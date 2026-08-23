@@ -89,6 +89,11 @@ class UserResource(resources.ModelResource):
     class Meta:
         model = User
         import_id_fields = ["email"]
+        # NOTE: "state" must be listed explicitly. Up to django-import-export 3.x,
+        # fields declared as attributes on the Resource bypassed this whitelist;
+        # from 4.0 the whitelist applies to them too and unlisted ones are dropped
+        # (upstream #1693). Without this entry the member export silently loses
+        # its "state" column.
         fields = (
             "email",
             "staff",
@@ -97,6 +102,7 @@ class UserResource(resources.ModelResource):
             "last_name",
             "screen_name",
             "rfid",
+            "state",
         )
 
 

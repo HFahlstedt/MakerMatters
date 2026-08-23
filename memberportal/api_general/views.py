@@ -7,9 +7,9 @@ from django.contrib.auth import (
 import logging
 from constance import config
 import json
+from django.utils import timezone
 from django.utils.timezone import make_aware
 import datetime
-from pytz import UTC as utc
 from profile.models import User, Profile
 
 from rest_framework import status, permissions, generics
@@ -324,7 +324,7 @@ class ResetPassword(APIView):
 
             if (
                 user
-                and utc.localize(datetime.datetime.now()) < user.password_reset_expire
+                and timezone.now() < user.password_reset_expire
             ):
                 return Response({"success": True})
 
@@ -340,7 +340,7 @@ class ResetPassword(APIView):
 
             if (
                 user
-                and utc.localize(datetime.datetime.now()) < user.password_reset_expire
+                and timezone.now() < user.password_reset_expire
             ):
                 user.set_password(body.get("password"))
                 user.password_reset_key = None
@@ -757,9 +757,9 @@ class VerifyEmail(APIView):
                 status=status.HTTP_401_UNAUTHORIZED,
             )
 
-        if utc.localize(
-            datetime.datetime.now()
-        ) < verification_token.creation_date + datetime.timedelta(hours=24):
+        if timezone.now() < verification_token.creation_date + datetime.timedelta(
+            hours=24
+        ):
             verification_token.user.email_verified = True
             verification_token.user.save()
 

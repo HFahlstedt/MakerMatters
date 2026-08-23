@@ -45,8 +45,8 @@ if os.environ.get("MM_ENV") == "Production":
 
 # Application definition
 INSTALLED_APPS = [
+    "daphne",
     "constance",
-    "constance.backends.database",
     "django_prometheus",
     "django.contrib.admin",
     "django.contrib.auth",
@@ -352,7 +352,6 @@ LANGUAGE_CODE = os.getenv("MM_LANGUAGE_CODE", "en-au")
 
 TIME_ZONE = os.getenv("MM_TIME_ZONE", "Australia/Brisbane")
 USE_I18N = True
-USE_L10N = True
 USE_TZ = True
 
 STATIC_URL = "/static/"
@@ -374,7 +373,7 @@ CELERY_BEAT_SCHEDULER = "django_celery_beat.schedulers:DatabaseScheduler"
 CELERY_BROKER_URL = os.getenv("MM_REDIS_HOST")
 
 # Django constance configuration
-CONSTANCE_BACKEND = "membermatters.constance_backend.DatabaseBackend"
+CONSTANCE_BACKEND = "constance.backends.database.DatabaseBackend"
 CONSTANCE_CONFIG = CONSTANCE_CONFIG
 CONSTANCE_CONFIG_FIELDSETS = CONSTANCE_CONFIG_FIELDSETS
 

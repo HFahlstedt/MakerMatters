@@ -8,7 +8,10 @@ VOLUME /usr/src/logs/
 
 RUN mkdir -p /usr/src/app/frontend && mkdir /usr/src/logs && mkdir /usr/src/data
 
-RUN apt-get update -y && apt-get install -y nginx curl daphne
+# daphne is no longer installed from apt: channels 4 requires it as an explicit
+# pip dependency (see requirements.txt), and having both risks `exec daphne`
+# resolving to the system-python copy, which cannot import the app's packages.
+RUN apt-get update -y && apt-get install -y nginx curl
 
 # Install Node
 ENV NODE_VERSION=22.2.0
