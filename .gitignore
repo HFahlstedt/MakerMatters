@@ -48,6 +48,10 @@ nosetests.xml
 coverage.xml
 *.cover
 .hypothesis/
+.pytest_cache/
+# Local pytest run artifacts (see memberportal/pytest.ini)
+.pytest-media/
+.pytest-static/
 
 # Translations
 *.mo

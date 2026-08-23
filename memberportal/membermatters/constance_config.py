@@ -466,7 +466,6 @@ CONSTANCE_CONFIG_FIELDSETS = OrderedDict(
                 "SMS_ENABLE",
                 "TWILIO_ACCOUNT_SID",
                 "TWILIO_AUTH_TOKEN",
-                "TWILIO_AUTH_TOKEN",
                 "SMS_DEFAULT_COUNTRY_CODE",
                 "SMS_SENDER_ID",
                 "SMS_MESSAGES",

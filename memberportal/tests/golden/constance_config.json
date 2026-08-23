@@ -1,0 +1,601 @@
+{
+  "fieldsets": {
+    "Canvas (LMS) Integration": [
+      "CANVAS_INDUCTION_ENABLED",
+      "CANVAS_API_TOKEN",
+      "CANVAS_INDUCTION_COURSE_ID"
+    ],
+    "Contact Information": [
+      "EMAIL_SYSADMIN",
+      "EMAIL_ADMIN",
+      "EMAIL_DEFAULT_FROM",
+      "SITE_MAIL_ADDRESS"
+    ],
+    "Discord Integration": [
+      "DISCORD_DOOR_WEBHOOK",
+      "DISCORD_INTERLOCK_WEBHOOK",
+      "DISCORD_MEMBERBUCKS_PURCHASE_WEBHOOK",
+      "DISCORD_REPORT_ISSUE_WEBHOOK"
+    ],
+    "Discourse SSO Protocol": [
+      "DISCOURSE_SSO_PROTOCOL_SECRET_KEY"
+    ],
+    "Features": [
+      "ENABLE_WEBCAMS",
+      "ENABLE_PROXY_VOTING",
+      "ENABLE_STRIPE",
+      "ENABLE_STRIPE_MEMBERSHIP_PAYMENTS",
+      "ENABLE_MEMBERBUCKS",
+      "ENABLE_DISCOURSE_SSO_PROTOCOL",
+      "ENABLE_DISCORD_INTEGRATION",
+      "ENABLE_SLACK_INTEGRATION",
+      "ENABLE_SPACE_DIRECTORY",
+      "ENABLE_THEME_SWIPE",
+      "ENABLE_PORTAL_SITE_SIGN_IN",
+      "ENABLE_PORTAL_MEMBERS_ON_SITE",
+      "ENABLE_DOOR_BUMP_API"
+    ],
+    "General": [
+      "SITE_NAME",
+      "SITE_OWNER",
+      "SITE_LOCALE_CURRENCY",
+      "GOOGLE_ANALYTICS_MEASUREMENT_ID",
+      "SITE_BANNER",
+      "METRICS_INTERVAL"
+    ],
+    "Group Localisation": [
+      "MEMBERBUCKS_NAME",
+      "WEBCAM_PAGE_URLS",
+      "HOME_PAGE_CARDS",
+      "WELCOME_EMAIL_CARDS"
+    ],
+    "Images": [
+      "SITE_LOGO",
+      "SITE_FAVICON",
+      "STATS_CARD_IMAGE",
+      "MENU_BACKGROUND"
+    ],
+    "Mailchimp (EMAIL MARKETING)": [
+      "MAILCHIMP_API_KEY",
+      "MAILCHIMP_SERVER",
+      "MAILCHIMP_LIST_ID",
+      "MAILCHIMP_TAG"
+    ],
+    "Memberbucks": [
+      "MEMBERBUCKS_MAX_TOPUP"
+    ],
+    "Moodle (LMS) Integration": [
+      "MOODLE_INDUCTION_ENABLED",
+      "MOODLE_API_TOKEN",
+      "MOODLE_API_BASE_URL",
+      "MOODLE_INDUCTION_COURSE_ID"
+    ],
+    "Postmark (EMAIL) Integration": [
+      "POSTMARK_API_KEY"
+    ],
+    "Report Issue Services": [
+      "REPORT_ISSUE_ENABLE_EMAIL",
+      "REPORT_ISSUE_ENABLE_DISCORD",
+      "REPORT_ISSUE_ENABLE_VIKUNJA",
+      "REPORT_ISSUE_ENABLE_TRELLO"
+    ],
+    "Sentry Error Reporting": [
+      "SENTRY_DSN_FRONTEND",
+      "SENTRY_DSN_BACKEND"
+    ],
+    "Signup": [
+      "INDUCTION_ENROL_LINK",
+      "MAX_INDUCTION_DAYS",
+      "MIN_INDUCTION_SCORE",
+      "REQUIRE_ACCESS_CARD",
+      "COLLECT_VEHICLE_REGISTRATION_PLATE"
+    ],
+    "Slack Integration": [
+      "SLACK_DOOR_WEBHOOK",
+      "SLACK_INTERLOCK_WEBHOOK",
+      "SLACK_MEMBERBUCKS_PURCHASE_WEBHOOK",
+      "SLACK_REPORT_ISSUE_WEBHOOK"
+    ],
+    "Space Directory": [
+      "SPACE_DIRECTORY_OPEN",
+      "SPACE_DIRECTORY_MESSAGE",
+      "SPACE_DIRECTORY_ICON_OPEN",
+      "SPACE_DIRECTORY_ICON_CLOSED",
+      "SPACE_DIRECTORY_LOCATION_ADDRESS",
+      "SPACE_DIRECTORY_LOCATION_LAT",
+      "SPACE_DIRECTORY_LOCATION_LON",
+      "SPACE_DIRECTORY_FED_SPACENET",
+      "SPACE_DIRECTORY_FED_SPACESAML",
+      "SPACE_DIRECTORY_CAMS",
+      "SPACE_DIRECTORY_CONTACT_EMAIL",
+      "SPACE_DIRECTORY_FED_SPACEPHONE",
+      "SPACE_DIRECTORY_CONTACT_TWITTER",
+      "SPACE_DIRECTORY_CONTACT_FACEBOOK",
+      "SPACE_DIRECTORY_CONTACT_PHONE",
+      "SPACE_DIRECTORY_PROJECTS"
+    ],
+    "Stats Settings": [
+      "ENABLE_STATS_PAGE",
+      "STATS_MAX_DAYS"
+    ],
+    "Stripe (PAYMENT GATEWAY) Integration": [
+      "STRIPE_PUBLISHABLE_KEY",
+      "STRIPE_SECRET_KEY",
+      "STRIPE_WEBHOOK_SECRET",
+      "STRIPE_MEMBERBUCKS_TOPUP_OPTIONS",
+      "MEMBERBUCKS_CURRENCY"
+    ],
+    "Theme": [
+      "THEME_PRIMARY",
+      "THEME_TOOLBAR",
+      "THEME_ACCENT"
+    ],
+    "Theme Swipe Integration": [
+      "THEME_SWIPE_URL"
+    ],
+    "Trello Integration": [
+      "TRELLO_API_KEY",
+      "TRELLO_API_TOKEN",
+      "TRELLO_ID_LIST"
+    ],
+    "Twilio (SMS) Integration": [
+      "SMS_ENABLE",
+      "TWILIO_ACCOUNT_SID",
+      "TWILIO_AUTH_TOKEN",
+      "SMS_DEFAULT_COUNTRY_CODE",
+      "SMS_SENDER_ID",
+      "SMS_MESSAGES",
+      "SMS_FOOTER"
+    ],
+    "URLs": [
+      "SITE_URL",
+      "MAIN_SITE_URL",
+      "POST_INDUCTION_URL"
+    ],
+    "Vikunja Integration": [
+      "VIKUNJA_TEAMS",
+      "VIKUNJA_API_URL",
+      "VIKUNJA_API_TOKEN",
+      "VIKUNJA_DEFAULT_PROJECT_ID",
+      "VIKUNJA_DEFAULT_LABEL_ID"
+    ]
+  },
+  "keys": {
+    "CANVAS_API_TOKEN": {
+      "default": "PLEASE_CHANGE_ME",
+      "type": "str"
+    },
+    "CANVAS_INDUCTION_COURSE_ID": {
+      "default": "",
+      "type": "str"
+    },
+    "CANVAS_INDUCTION_ENABLED": {
+      "default": false,
+      "type": "bool"
+    },
+    "COLLECT_VEHICLE_REGISTRATION_PLATE": {
+      "default": false,
+      "type": "bool"
+    },
+    "DISCORD_DOOR_WEBHOOK": {
+      "default": "https://discordapp.com/api/webhooks/<token>",
+      "type": "str"
+    },
+    "DISCORD_INTERLOCK_WEBHOOK": {
+      "default": "https://discordapp.com/api/webhooks/<token>",
+      "type": "str"
+    },
+    "DISCORD_MEMBERBUCKS_PURCHASE_WEBHOOK": {
+      "default": "https://discordapp.com/api/webhooks/<token>",
+      "type": "str"
+    },
+    "DISCORD_REPORT_ISSUE_WEBHOOK": {
+      "default": "https://discordapp.com/api/webhooks/<token>",
+      "type": "str"
+    },
+    "DISCOURSE_SSO_PROTOCOL_SECRET_KEY": {
+      "default": "",
+      "type": "str"
+    },
+    "EMAIL_ADMIN": {
+      "default": "example@example.com",
+      "type": "str"
+    },
+    "EMAIL_DEFAULT_FROM": {
+      "default": "\"MemberMatters Portal\" <example@example.org>",
+      "type": "str"
+    },
+    "EMAIL_SYSADMIN": {
+      "default": "example@example.com",
+      "type": "str"
+    },
+    "ENABLE_DISCORD_INTEGRATION": {
+      "default": false,
+      "type": "bool"
+    },
+    "ENABLE_DISCOURSE_SSO_PROTOCOL": {
+      "default": false,
+      "type": "bool"
+    },
+    "ENABLE_DOOR_BUMP_API": {
+      "default": false,
+      "type": "bool"
+    },
+    "ENABLE_MEMBERBUCKS": {
+      "default": false,
+      "type": "bool"
+    },
+    "ENABLE_PORTAL_MEMBERS_ON_SITE": {
+      "default": false,
+      "type": "bool"
+    },
+    "ENABLE_PORTAL_SITE_SIGN_IN": {
+      "default": false,
+      "type": "bool"
+    },
+    "ENABLE_PROXY_VOTING": {
+      "default": false,
+      "type": "bool"
+    },
+    "ENABLE_SLACK_INTEGRATION": {
+      "default": false,
+      "type": "bool"
+    },
+    "ENABLE_SPACE_DIRECTORY": {
+      "default": false,
+      "type": "bool"
+    },
+    "ENABLE_STATS_PAGE": {
+      "default": true,
+      "type": "bool"
+    },
+    "ENABLE_STRIPE": {
+      "default": true,
+      "type": "bool"
+    },
+    "ENABLE_STRIPE_MEMBERSHIP_PAYMENTS": {
+      "default": false,
+      "type": "bool"
+    },
+    "ENABLE_THEME_SWIPE": {
+      "default": false,
+      "type": "bool"
+    },
+    "ENABLE_WEBCAMS": {
+      "default": false,
+      "type": "bool"
+    },
+    "GOOGLE_ANALYTICS_MEASUREMENT_ID": {
+      "default": "",
+      "type": "str"
+    },
+    "HOME_PAGE_CARDS": {
+      "default": "[\n            {\n                \"title\": \"Example Card\",\n                \"description\": \"Tap below to see a calendar with all of our upcoming events and workshops.\",\n                \"icon\": \"mdi-calendar-multiselect\",\n                \"url\": \"https://brisbanemaker.space\",\n                \"btn_text\": \"View Calendar\"\n            },\n            {\n                \"title\": \"Example 2\",\n                \"description\": \"This is an example card with an icon! And it links to another page using a Vue route!\",\n                \"icon\": \"mdi-link-variant\",\n                \"routerLink\": {\n                \"name\": \"reportIssue\"\n                },\n                \"btn_text\": \"Go to route\"\n            }\n           ]\n        ",
+      "type": "str"
+    },
+    "INDUCTION_ENROL_LINK": {
+      "default": "",
+      "type": "str"
+    },
+    "MAILCHIMP_API_KEY": {
+      "default": "",
+      "type": "str"
+    },
+    "MAILCHIMP_LIST_ID": {
+      "default": "",
+      "type": "str"
+    },
+    "MAILCHIMP_SERVER": {
+      "default": "",
+      "type": "str"
+    },
+    "MAILCHIMP_TAG": {
+      "default": "Member",
+      "type": "str"
+    },
+    "MAIN_SITE_URL": {
+      "default": "https://membermatters.org",
+      "type": "str"
+    },
+    "MAX_INDUCTION_DAYS": {
+      "default": 180,
+      "type": "int"
+    },
+    "MEMBERBUCKS_CURRENCY": {
+      "default": "aud",
+      "type": "str"
+    },
+    "MEMBERBUCKS_MAX_TOPUP": {
+      "default": "50",
+      "type": "str"
+    },
+    "MEMBERBUCKS_NAME": {
+      "default": "Memberbucks",
+      "type": "str"
+    },
+    "MENU_BACKGROUND": {
+      "default": "",
+      "type": "str"
+    },
+    "METRICS_INTERVAL": {
+      "default": 3600,
+      "type": "int"
+    },
+    "MIN_INDUCTION_SCORE": {
+      "default": 99,
+      "type": "int"
+    },
+    "MOODLE_API_BASE_URL": {
+      "default": "PLEASE_CHANGE_ME",
+      "type": "str"
+    },
+    "MOODLE_API_TOKEN": {
+      "default": "PLEASE_CHANGE_ME",
+      "type": "str"
+    },
+    "MOODLE_INDUCTION_COURSE_ID": {
+      "default": "",
+      "type": "str"
+    },
+    "MOODLE_INDUCTION_ENABLED": {
+      "default": true,
+      "type": "bool"
+    },
+    "POSTMARK_API_KEY": {
+      "default": "PLEASE_CHANGE_ME",
+      "type": "str"
+    },
+    "POST_INDUCTION_URL": {
+      "default": "https://eventbrite.com.au",
+      "type": "str"
+    },
+    "REPORT_ISSUE_ENABLE_DISCORD": {
+      "default": false,
+      "type": "bool"
+    },
+    "REPORT_ISSUE_ENABLE_EMAIL": {
+      "default": true,
+      "type": "bool"
+    },
+    "REPORT_ISSUE_ENABLE_TRELLO": {
+      "default": false,
+      "type": "bool"
+    },
+    "REPORT_ISSUE_ENABLE_VIKUNJA": {
+      "default": false,
+      "type": "bool"
+    },
+    "REQUIRE_ACCESS_CARD": {
+      "default": true,
+      "type": "bool"
+    },
+    "SENTRY_DSN_BACKEND": {
+      "default": "https://8ba460796a9a40d4ac2584e0e8dca59a@sentry.serv02.binarydigital.com.au/4",
+      "type": "str"
+    },
+    "SENTRY_DSN_FRONTEND": {
+      "default": "https://577dc95136cd402bb273d00f46c2a017@sentry.serv02.binarydigital.com.au/5/",
+      "type": "str"
+    },
+    "SITE_BANNER": {
+      "default": "",
+      "type": "str"
+    },
+    "SITE_FAVICON": {
+      "default": "https://brisbanemaker.space/wp-content/uploads/2021/10/favicon.png",
+      "type": "str"
+    },
+    "SITE_LOCALE_CURRENCY": {
+      "default": "en-AU",
+      "type": "str"
+    },
+    "SITE_LOGO": {
+      "default": "https://brisbanemaker.space/wp-content/uploads/2021/10/BMS-Logo-ONLY.png",
+      "type": "str"
+    },
+    "SITE_MAIL_ADDRESS": {
+      "default": "123 Example St, Nowhere",
+      "type": "str"
+    },
+    "SITE_NAME": {
+      "default": "MemberMatters Portal",
+      "type": "str"
+    },
+    "SITE_OWNER": {
+      "default": "MemberMatters",
+      "type": "str"
+    },
+    "SITE_URL": {
+      "default": "https://membermatters.org",
+      "type": "str"
+    },
+    "SLACK_DOOR_WEBHOOK": {
+      "default": "https://hooks.slack.com/services/T00000000/B00000000/<token>",
+      "type": "str"
+    },
+    "SLACK_INTERLOCK_WEBHOOK": {
+      "default": "https://hooks.slack.com/services/T00000000/B00000000/<token>",
+      "type": "str"
+    },
+    "SLACK_MEMBERBUCKS_PURCHASE_WEBHOOK": {
+      "default": "https://hooks.slack.com/services/T00000000/B00000000/<token>",
+      "type": "str"
+    },
+    "SLACK_REPORT_ISSUE_WEBHOOK": {
+      "default": "https://hooks.slack.com/services/T00000000/B00000000/<token>",
+      "type": "str"
+    },
+    "SMS_DEFAULT_COUNTRY_CODE": {
+      "default": "+61",
+      "type": "str"
+    },
+    "SMS_ENABLE": {
+      "default": false,
+      "type": "bool"
+    },
+    "SMS_FOOTER": {
+      "default": "From Example Makerspace.",
+      "type": "str"
+    },
+    "SMS_MESSAGES": {
+      "default": "{\"inactive_swipe\": \"Hi! Your swipe was just declined due to inactive membership. Please contact us if you need assistance.\",             \"deactivated_access\": \"Hi! Your site access was just turned off. Please check your email and contact us if you need assistance.\",             \"activated_access\": \"Hi! Your site access was just turned on. Please make sure you stay up to date with our policies and rules by visiting our website.\",             \"locked_out_swipe\": \"Hi! Your swipe was just declined due to a temporary maintenance lockout. Please contact us if you need assistance.\"}",
+      "type": "str"
+    },
+    "SMS_SENDER_ID": {
+      "default": "",
+      "type": "str"
+    },
+    "SPACE_DIRECTORY_CAMS": {
+      "default": "[]",
+      "type": "str"
+    },
+    "SPACE_DIRECTORY_CONTACT_EMAIL": {
+      "default": "notset@example.com",
+      "type": "str"
+    },
+    "SPACE_DIRECTORY_CONTACT_FACEBOOK": {
+      "default": "",
+      "type": "str"
+    },
+    "SPACE_DIRECTORY_CONTACT_PHONE": {
+      "default": "",
+      "type": "str"
+    },
+    "SPACE_DIRECTORY_CONTACT_TWITTER": {
+      "default": "",
+      "type": "str"
+    },
+    "SPACE_DIRECTORY_FED_SPACENET": {
+      "default": false,
+      "type": "bool"
+    },
+    "SPACE_DIRECTORY_FED_SPACEPHONE": {
+      "default": false,
+      "type": "bool"
+    },
+    "SPACE_DIRECTORY_FED_SPACESAML": {
+      "default": false,
+      "type": "bool"
+    },
+    "SPACE_DIRECTORY_ICON_CLOSED": {
+      "default": "",
+      "type": "str"
+    },
+    "SPACE_DIRECTORY_ICON_OPEN": {
+      "default": "",
+      "type": "str"
+    },
+    "SPACE_DIRECTORY_LOCATION_ADDRESS": {
+      "default": "123 Setme St",
+      "type": "str"
+    },
+    "SPACE_DIRECTORY_LOCATION_LAT": {
+      "default": 0.0,
+      "type": "float"
+    },
+    "SPACE_DIRECTORY_LOCATION_LON": {
+      "default": 0.0,
+      "type": "float"
+    },
+    "SPACE_DIRECTORY_MESSAGE": {
+      "default": "This is the default MemberMatters (membermatters.org) space directory message.",
+      "type": "str"
+    },
+    "SPACE_DIRECTORY_OPEN": {
+      "default": false,
+      "type": "bool"
+    },
+    "SPACE_DIRECTORY_PROJECTS": {
+      "default": "[]",
+      "type": "str"
+    },
+    "STATS_CARD_IMAGE": {
+      "default": "https://brisbanemaker.space/wp-content/uploads/2021/09/cool-students-studying-with-books-in-classroom-Y2DA4MC.jpg.webp",
+      "type": "str"
+    },
+    "STATS_MAX_DAYS": {
+      "default": 365,
+      "type": "int"
+    },
+    "STRIPE_MEMBERBUCKS_TOPUP_OPTIONS": {
+      "default": "[1000, 2000, 3000]",
+      "type": "str"
+    },
+    "STRIPE_PUBLISHABLE_KEY": {
+      "default": "",
+      "type": "str"
+    },
+    "STRIPE_SECRET_KEY": {
+      "default": "",
+      "type": "str"
+    },
+    "STRIPE_WEBHOOK_SECRET": {
+      "default": "",
+      "type": "str"
+    },
+    "THEME_ACCENT": {
+      "default": "#189ab4",
+      "type": "str"
+    },
+    "THEME_PRIMARY": {
+      "default": "#278ab0",
+      "type": "str"
+    },
+    "THEME_SWIPE_URL": {
+      "default": "http://10.0.1.50/playmp3.php?nickname={}",
+      "type": "str"
+    },
+    "THEME_TOOLBAR": {
+      "default": "#0461b1",
+      "type": "str"
+    },
+    "TRELLO_API_KEY": {
+      "default": "",
+      "type": "str"
+    },
+    "TRELLO_API_TOKEN": {
+      "default": "",
+      "type": "str"
+    },
+    "TRELLO_ID_LIST": {
+      "default": "",
+      "type": "str"
+    },
+    "TWILIO_ACCOUNT_SID": {
+      "default": "",
+      "type": "str"
+    },
+    "TWILIO_AUTH_TOKEN": {
+      "default": "",
+      "type": "str"
+    },
+    "VIKUNJA_API_TOKEN": {
+      "default": "",
+      "type": "str"
+    },
+    "VIKUNJA_API_URL": {
+      "default": "",
+      "type": "str"
+    },
+    "VIKUNJA_DEFAULT_LABEL_ID": {
+      "default": "",
+      "type": "str"
+    },
+    "VIKUNJA_DEFAULT_PROJECT_ID": {
+      "default": "",
+      "type": "str"
+    },
+    "VIKUNJA_TEAMS": {
+      "default": "[{\"name\": \"Members\", \"oidcID\": \"members\", \"description\": \"The default team for all members.\", \"isPublic\": false}]",
+      "type": "str"
+    },
+    "WEBCAM_PAGE_URLS": {
+      "default": "[[\"Example\", \"https://brisbanemaker.space/wp-content/uploads/2021/10/BMS-Logo-ONLY.png\"]]",
+      "type": "str"
+    },
+    "WELCOME_EMAIL_CARDS": {
+      "default": "[]",
+      "type": "str"
+    }
+  }
+}
