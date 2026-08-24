@@ -238,60 +238,22 @@ def test_signing_up_twice_is_refused(subscriber, as_member, stripe_stub):
     assert not stripe_stub.called("Subscription.create")
 
 
-def test_missing_default_payment_method_retry_is_broken(
+def test_missing_default_payment_method_is_recovered(
     make_member, as_member, make_tier_and_plan, stripe_stub, set_config
 ):
-    """DEFECT, pinned: the retry passes the wrong argument.
+    """Stripe can reject the first attempt when no default payment method is set.
 
-    ``PaymentPlanSignup.create_subscription(self, request, new_plan, attempts=0)``
-    recovers from a missing default payment method by setting one and retrying::
-
-        return self.create_subscription(attempts)
-
-    ``attempts`` (an int) lands in the ``request`` slot and ``new_plan`` is not
-    supplied at all, so the recovery path raises ``TypeError`` instead of
-    retrying. The member sees a 500 rather than a completed signup.
+    The view sets one and retries. The retry used to pass the attempt counter
+    where `request` belongs, and omit `new_plan` entirely, so it raised
+    TypeError instead of recovering.
     """
+    from profile.models import Profile
+
     set_config(ENABLE_STRIPE=True)
     _tier, plan = make_tier_and_plan()
     profile = make_member(state="noob", rfid="TAG-RETRY")
     profile.stripe_customer_id = "cus_retry"
-    profile.save()
-
-    stripe_stub.set(
-        "Subscription.create",
-        stripe.error.InvalidRequestError(
-            "This customer has no attached default payment method.",
-            param=None,
-            json_body={
-                "error": {
-                    "code": "resource_missing",
-                    "message": "This customer has no attached default payment method.",
-                }
-            },
-        ),
-    )
-
-    with pytest.raises(TypeError, match="new_plan"):
-        as_member(profile).post(f"/api/billing/plans/{plan.id}/signup/")
-
-    # It did attempt the recovery before falling over.
-    assert stripe_stub.called("Customer.modify")
-
-
-@pytest.mark.xfail(
-    strict=True,
-    reason="DEFECT: create_subscription() retries with self.create_subscription(attempts), "
-    "passing the attempt count where `request` belongs and omitting `new_plan`.",
-)
-def test_missing_default_payment_method_should_be_recovered(
-    make_member, as_member, make_tier_and_plan, stripe_stub, set_config
-):
-    """The behaviour we WANT: set the default payment method, retry, succeed."""
-    set_config(ENABLE_STRIPE=True)
-    _tier, plan = make_tier_and_plan()
-    profile = make_member(state="noob", rfid="TAG-RETRY-OK")
-    profile.stripe_customer_id = "cus_retry_ok"
+    profile.stripe_payment_method_id = "pm_retry"
     profile.save()
 
     attempts = {"n": 0}
@@ -316,6 +278,39 @@ def test_missing_default_payment_method_should_be_recovered(
     response = as_member(profile).post(f"/api/billing/plans/{plan.id}/signup/")
 
     assert response.json() == {"success": True}
+    assert attempts["n"] == 2
+    assert stripe_stub.called("Customer.modify")
+    assert Profile.objects.get(pk=profile.pk).stripe_subscription_id == "sub_retried"
+
+
+def test_the_retry_gives_up_after_three_attempts(
+    make_member, as_member, make_tier_and_plan, stripe_stub, set_config
+):
+    """A permanently missing payment method must not recurse forever."""
+    set_config(ENABLE_STRIPE=True)
+    _tier, plan = make_tier_and_plan()
+    profile = make_member(state="noob", rfid="TAG-RETRY-CAP")
+    profile.stripe_customer_id = "cus_retry_cap"
+    profile.save()
+
+    stripe_stub.set(
+        "Subscription.create",
+        stripe.error.InvalidRequestError(
+            "This customer has no attached default payment method.",
+            param=None,
+            json_body={
+                "error": {
+                    "code": "resource_missing",
+                    "message": "This customer has no attached default payment method.",
+                }
+            },
+        ),
+    )
+
+    response = as_member(profile).post(f"/api/billing/plans/{plan.id}/signup/")
+
+    assert response.status_code == 500
+    assert len(stripe_stub.calls_to("Subscription.create")) <= 3
 
 
 # --------------------------------------------------------------------------

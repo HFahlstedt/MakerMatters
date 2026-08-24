@@ -4,11 +4,21 @@ These tests describe how the system behaves **today**, on Django 3.2. They are
 the acceptance criteria for the planned Django 4.2 → 5.2 upgrade: green before
 the upgrade, green after it.
 
-That framing matters when reading them. A few assertions pin behaviour that is
-plainly wrong; those are labelled `DEFECT, pinned` and paired with a
+That framing matters when reading them. Where a test pins behaviour that is
+plainly wrong it is labelled `DEFECT, pinned`, and is paired with a
 `@pytest.mark.xfail(strict=True)` test describing what the behaviour *should*
-be. When someone fixes the defect, the xfail flips to XPASS and the suite fails
-loudly, prompting both tests to be updated together.
+be. When someone fixes the defect the xfail flips to XPASS and the suite fails
+loudly, forcing both tests to be updated together. Four defects found this way
+have since been fixed and their xfails removed; three remain pinned as
+`DEFECT, pinned` without a paired xfail, because the correct behaviour is a
+product decision rather than an obvious bug:
+
+- a brand-new member is rate-limited out of their first vending purchase,
+  because `last_memberbucks_purchase` defaults to *now* at signup
+- `/api/billing/access-card/` accepts any unused tag with no proof the member
+  holds that card, and a duplicate surfaces as an unhandled `IntegrityError`
+- the Stripe webhook's customer lookup catches only `DoesNotExist`, so an event
+  with an empty customer field raises `MultipleObjectsReturned`
 
 ## Running
 

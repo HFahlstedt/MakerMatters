@@ -33,6 +33,7 @@ User = auth.get_user_model()
 utc = pytz.UTC
 
 
+
 class AccessControlledDeviceAPIKey(AbstractAPIKey):
     class Meta:
         # Add verbose name
@@ -527,10 +528,14 @@ class InterlockLog(ExportModelOperationsMixin("interlock-log"), models.Model):
         self.date_updated = timezone.now()
         self.total_time = self.date_updated - self.date_started
         self.interlock.checkin()
-        self.total_cost = self.calculate_cost()
 
+        # The reading must be stored before the cost is calculated. Doing it the
+        # other way round bills the *previous* reading, so a session that only
+        # reports kWh at session_end is never billed for energy at all.
         if kwh:
             self.total_kwh = kwh
+
+        self.total_cost = self.calculate_cost()
 
         self.save()
 

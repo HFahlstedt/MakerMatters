@@ -490,7 +490,12 @@ class MemberbucksConsumer(AccessDeviceConsumer):
         if content.get("command") == "debit" or content.get("command") == "credit":
             card_id = content.get("card_id")
             product_external_id = content.get("product_external_id")
-            amount = int(content.get("amount") or 0)
+            # The device speaks in cents throughout: `balance` replies are cents,
+            # and MemberbucksProduct.price / MemberbucksProductPurchaseLog.price are
+            # documented as cents. MemberBucks.amount is the only dollar-denominated
+            # field, so convert once here instead of mixing units downstream.
+            amount_cents = int(content.get("amount") or 0)
+            amount_dollars = amount_cents / 100
             description = content.get("description", f"{self.device.name} purchase.")
             command = content.get("command")
 
@@ -505,7 +510,7 @@ class MemberbucksConsumer(AccessDeviceConsumer):
                 return True
 
             # stops us accidentally accepting a negative value
-            if amount <= 0:
+            if amount_cents <= 0:
                 self.send_json(
                     {
                         "command": command,
@@ -531,20 +536,20 @@ class MemberbucksConsumer(AccessDeviceConsumer):
                 )
                 return True
 
-            if command == "debit" and profile.memberbucks_balance < amount:
+            if command == "debit" and profile.memberbucks_balance < amount_dollars:
                 # TODO: auto top up feature
 
                 profile.user.log_event(
-                    f"Not enough funds to debit ${amount} from {config.MEMBERBUCKS_NAME} account by {self.device.name}.",
+                    f"Not enough funds to debit ${amount_dollars:.2f} from {config.MEMBERBUCKS_NAME} account by {self.device.name}.",
                     "memberbucks",
                 )
 
-                subject = (
-                    f"Failed to make a ${amount} {config.MEMBERBUCKS_NAME} purchase."
+                subject = f"Failed to make a ${amount_dollars:.2f} {config.MEMBERBUCKS_NAME} purchase."
+                message = (
+                    f"We just tried to debit ${amount_dollars:.2f} from your {config.MEMBERBUCKS_NAME} balance but were not "
+                    f"successful. You currently have ${profile.memberbucks_balance}. If this wasn't you, please let us know "
+                    f"immediately."
                 )
-                message = f"We just tried to debit ${amount} from your {config.MEMBERBUCKS_NAME} balance but were not "
-                f"successful. You currently have ${profile.memberbucks_balance}. If this wasn't you, please let us know "
-                f"immediately."
 
                 User.objects.get(profile=profile).email_notification(subject, message)
 
@@ -564,7 +569,9 @@ class MemberbucksConsumer(AccessDeviceConsumer):
 
             # We have a hard rate limit of one transaction every 3 seconds at most
             if time_dif > 3:
-                amount = float(amount) if command == "credit" else float(amount * -1)
+                signed_dollars = (
+                    amount_dollars if command == "credit" else -amount_dollars
+                )
 
                 if product_external_id:
                     try:
@@ -587,7 +594,7 @@ class MemberbucksConsumer(AccessDeviceConsumer):
                     purchase_log.product = product
                     purchase_log.user = profile.user
                     purchase_log.cost_price = product.cost_price
-                    purchase_log.price = amount
+                    purchase_log.price = amount_cents
                     purchase_log.memberbucks_device = self.device
                     purchase_log.save()
 
@@ -598,7 +605,7 @@ class MemberbucksConsumer(AccessDeviceConsumer):
                     )
 
                 transaction = MemberBucks()
-                transaction.amount = amount
+                transaction.amount = signed_dollars
                 transaction.user = profile.user
                 transaction.description = description
                 transaction.transaction_type = "card"
@@ -608,17 +615,17 @@ class MemberbucksConsumer(AccessDeviceConsumer):
                 profile.save()
                 profile.refresh_from_db()
 
-                subject = (
-                    f"You just made a ${amount} {config.MEMBERBUCKS_NAME} purchase."
+                subject = f"You just made a ${amount_dollars:.2f} {config.MEMBERBUCKS_NAME} purchase."
+                message = (
+                    f"Description: {transaction.description}. Balance Remaining: "
+                    f"${profile.memberbucks_balance}. If this wasn't you, or you believe there "
+                    f"has been an error, please let us know."
                 )
-                message = f"Description: {transaction.description}. Balance Remaining: "
-                f"${profile.memberbucks_balance}. If this wasn't you, or you believe there "
-                f"has been an error, please let us know."
 
                 User.objects.get(profile=profile).email_notification(subject, message)
 
                 profile.user.log_event(
-                    f"{command}ed ${amount} from {config.MEMBERBUCKS_NAME} account.",
+                    f"{command}ed ${amount_dollars:.2f} from {config.MEMBERBUCKS_NAME} account.",
                     "memberbucks",
                 )
 

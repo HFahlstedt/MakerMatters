@@ -237,12 +237,7 @@ async def test_a_brand_new_member_is_rate_limited_out_of_their_first_purchase(
 async def test_debit_writes_a_card_transaction_and_returns_the_new_balance(
     vending_with_member, device_api_key, sent_emails
 ):
-    """Pins the CURRENT units behaviour, which is inconsistent — see the test below.
-
-    ``amount`` arrives from the device in cents, but is written straight into
-    ``MemberBucks.amount``, which is dollars everywhere else in the codebase.
-    A debit of 100 therefore removes 100 DOLLARS, not one dollar.
-    """
+    """A 100 cent debit removes one dollar, and every amount on the wire is cents."""
     from memberbucks.models import MemberBucks
 
     _device, profile = await ws.aget(vending_with_member)(
@@ -258,13 +253,13 @@ async def test_debit_writes_a_card_transaction_and_returns_the_new_balance(
 
     assert reply["command"] == "debit"
     assert reply["success"] is True
-    assert reply["amount"] == -10000  # int(-100 dollars * 100)
-    assert reply["balance"] == 40000  # $400 remaining, in cents
+    assert reply["amount"] == -100  # cents
+    assert reply["balance"] == 49900  # $499 remaining, in cents
 
     txn = await ws.aget(MemberBucks.objects.get)(
         user_id=profile.user_id, transaction_type="card"
     )
-    assert txn.amount == pytest.approx(-100.0)
+    assert txn.amount == pytest.approx(-1.0)
 
 
 async def test_credit_increases_the_balance(
@@ -278,7 +273,7 @@ async def test_credit_increases_the_balance(
     await ws.aget(_clear_rate_limit(profile.pk))()
 
     comm, _ = await ws.open_authenticated("memberbucks", "vend-credit", device_api_key)
-    await comm.send_json_to({"command": "credit", "card_id": "TAG-VEND", "amount": 5})
+    await comm.send_json_to({"command": "credit", "card_id": "TAG-VEND", "amount": 500})
     assert (await comm.receive_json_from(timeout=ws.TIMEOUT))["success"] is True
     await comm.disconnect()
 
@@ -309,11 +304,7 @@ async def test_debit_notifies_the_member(
 async def test_insufficient_funds_are_refused(
     vending_with_member, device_api_key, sent_emails
 ):
-    """Pins the CURRENT comparison, which mixes units.
-
-    ``profile.memberbucks_balance`` (dollars) is compared against ``amount``
-    (cents), so a member holding $10 is refused a 500-cent ($5) purchase.
-    """
+    """A member holding $10 cannot spend $15."""
     from memberbucks.models import MemberBucks
 
     _device, profile = await ws.aget(vending_with_member)(
@@ -324,7 +315,7 @@ async def test_insufficient_funds_are_refused(
     comm, _ = await ws.open_authenticated(
         "memberbucks", "vend-insufficient", device_api_key
     )
-    await comm.send_json_to({"command": "debit", "card_id": "TAG-VEND", "amount": 500})
+    await comm.send_json_to({"command": "debit", "card_id": "TAG-VEND", "amount": 1500})
 
     reply = await comm.receive_json_from(timeout=ws.TIMEOUT)
     await comm.disconnect()
@@ -339,17 +330,14 @@ async def test_insufficient_funds_are_refused(
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="DEFECT: the device sends `amount` in cents (the balance replies are in "
-    "cents), but the debit path compares it against a dollar-denominated balance "
-    "and writes it into MemberBucks.amount, which is dollars. A $10 member is "
-    "refused a $5 purchase, and a successful debit removes 100x too much.",
-)
 async def test_a_member_with_ten_dollars_can_make_a_five_dollar_purchase(
     vending_with_member, device_api_key, sent_emails
 ):
-    """The behaviour we WANT. Flips to XPASS once the units are reconciled."""
+    """The case the old cents/dollars mismatch got wrong in both directions.
+
+    Before the fix a $10 balance was compared against 500 (cents) and the
+    purchase was refused; had it gone through, it would have removed $500.
+    """
     from profile.models import Profile
 
     _device, profile = await ws.aget(vending_with_member)(
@@ -367,3 +355,45 @@ async def test_a_member_with_ten_dollars_can_make_a_five_dollar_purchase(
 
     refreshed = await ws.aget(Profile.objects.get)(pk=profile.pk)
     assert refreshed.memberbucks_balance == pytest.approx(5.0)
+
+
+async def test_a_product_purchase_logs_the_price_in_positive_cents(
+    vending_with_member, device_api_key, sent_emails
+):
+    """``MemberbucksProductPurchaseLog.price`` is documented as cents.
+
+    It previously received the signed dollar amount, which made it negative for
+    every debit and inverted the admin screen's total-volume figure.
+    """
+    from memberbucks.models import MemberbucksProduct, MemberbucksProductPurchaseLog
+
+    _device, profile = await ws.aget(vending_with_member)(
+        serial="vend-product", balance_dollars=50
+    )
+    await ws.aget(_clear_rate_limit(profile.pk))()
+    await ws.aget(MemberbucksProduct.objects.create)(
+        name="Cola",
+        external_id="A1",
+        external_id_name="A1",
+        price=250,
+        cost_price=100,
+        stock_level=10,
+    )
+
+    comm, _ = await ws.open_authenticated("memberbucks", "vend-product", device_api_key)
+    await comm.send_json_to(
+        {
+            "command": "debit",
+            "card_id": "TAG-VEND",
+            "amount": 250,
+            "product_external_id": "A1",
+        }
+    )
+    assert (await comm.receive_json_from(timeout=ws.TIMEOUT))["success"] is True
+    await comm.disconnect()
+
+    log = await ws.aget(MemberbucksProductPurchaseLog.objects.get)(
+        user_id=profile.user_id
+    )
+    assert log.price == 250
+    assert log.cost_price == 100

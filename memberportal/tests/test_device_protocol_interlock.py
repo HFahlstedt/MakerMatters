@@ -299,15 +299,12 @@ async def test_short_sessions_are_free(interlock_with_member, device_api_key):
     assert await ws.aget(MemberBucks.objects.count)() == 0
 
 
-async def test_session_cost_combines_fixed_and_hourly_rates(
+async def test_session_cost_combines_fixed_hourly_and_energy_rates(
     interlock_with_member, device_api_key
 ):
-    """cost = per_session + hours x per_hour, in cents, debited as a negative wallet row.
+    """cost = per_session + hours x per_hour + kWh x per_kwh, in cents.
 
-    Here: 100 + (1h x 600) = 700 cents => -7.00.
-
-    Note the kWh reading sent with this same message contributes NOTHING. That
-    is a live defect, characterised precisely in the two tests below.
+    Here: 100 + (1h x 600) + (2kWh x 50) = 800 cents, debited as -8.00.
     """
     from access.models import InterlockLog
     from memberbucks.models import MemberBucks
@@ -339,39 +336,32 @@ async def test_session_cost_combines_fixed_and_hourly_rates(
 
     session = await ws.aget(InterlockLog.objects.get)(id=session_id)
     assert session.date_ended is not None
-    assert session.total_cost == 700
-    assert session.total_kwh == 2  # recorded, but not billed
+    assert session.total_cost == 800
+    assert session.total_kwh == 2
 
     charge = await ws.aget(MemberBucks.objects.get)(user_id=profile.user_id)
     assert charge.transaction_type == "interlock"
-    assert charge.amount == pytest.approx(-7.0)
+    assert charge.amount == pytest.approx(-8.0)
 
 
-async def test_energy_cost_lags_one_update_behind(
+async def test_energy_cost_uses_the_latest_reading(
     interlock_with_member, device_api_key
 ):
-    """DEFECT, pinned: kWh billing is always one reading stale.
+    """Each update bills the reading supplied with it, not the previous one.
 
-    ``InterlockLog.session_update`` computes ``total_cost`` *before* assigning
-    the incoming ``kwh``, so each call bills the previous reading:
-
-        self.total_cost = self.calculate_cost()   # reads the OLD total_kwh
-        if kwh:
-            self.total_kwh = kwh                  # only now updated
-
-    Sequence below: update reports 2 kWh (billed as 0), end reports 5 kWh
-    (billed as 2). Correct would be 100 + 600 + 5x50 = 950.
+    Sequence: an update reports 2 kWh, then session_end reports 5 kWh. The
+    final cost must use 5, giving 100 + 600 + (5 x 50) = 950 cents.
     """
     from access.models import InterlockLog
 
     await ws.aget(interlock_with_member)(
-        serial="int-kwh-lag",
+        serial="int-kwh-latest",
         cost_per_session=100,
         cost_per_hour=600,
         cost_per_kwh=50,
     )
 
-    comm, _ = await ws.open_authenticated("interlock", "int-kwh-lag", device_api_key)
+    comm, _ = await ws.open_authenticated("interlock", "int-kwh-latest", device_api_key)
     await comm.send_json_to(
         {"command": "interlock_session_start", "card_id": "TAG-INT"}
     )
@@ -401,50 +391,41 @@ async def test_energy_cost_lags_one_update_behind(
 
     session = await ws.aget(InterlockLog.objects.get)(id=session_id)
     assert session.total_kwh == 5
-    assert session.total_cost == 800  # 100 + 600 + (2 x 50), using the stale reading
+    assert session.total_cost == 950
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="DEFECT: session_update() computes cost before storing the new kWh reading, "
-    "so energy is billed one update late and a session reporting kWh only at "
-    "end is never billed for energy at all.",
-)
-async def test_energy_cost_should_bill_the_reading_supplied_with_it(
+async def test_energy_is_billed_when_reported_only_at_session_end(
     interlock_with_member, device_api_key
 ):
-    """The behaviour we WANT. Flips to XPASS the moment the defect is fixed."""
+    """The case that used to be billed as zero energy."""
     from access.models import InterlockLog
 
     await ws.aget(interlock_with_member)(
-        serial="int-kwh-correct",
-        cost_per_session=100,
-        cost_per_hour=600,
-        cost_per_kwh=50,
+        serial="int-kwh-end-only", cost_per_session=0, cost_per_hour=0, cost_per_kwh=50
     )
 
     comm, _ = await ws.open_authenticated(
-        "interlock", "int-kwh-correct", device_api_key
+        "interlock", "int-kwh-end-only", device_api_key
     )
     await comm.send_json_to(
         {"command": "interlock_session_start", "card_id": "TAG-INT"}
     )
     session_id = (await comm.receive_json_from(timeout=ws.TIMEOUT))["session_id"]
 
-    await ws.aget(_backdate(session_id, 3600))()
+    await ws.aget(_backdate(session_id, 60))()
     await comm.send_json_to(
         {
             "command": "interlock_session_end",
             "session_id": session_id,
             "card_id": "TAG-INT",
-            "session_kwh": 2,
+            "session_kwh": 3,
         }
     )
     await comm.receive_json_from(timeout=ws.TIMEOUT)
     await comm.disconnect()
 
     session = await ws.aget(InterlockLog.objects.get)(id=session_id)
-    assert session.total_cost == 800  # 100 + 600 + (2 x 50)
+    assert session.total_cost == 150  # 3 kWh x 50c
 
 
 async def test_session_charge_can_push_a_member_negative(
