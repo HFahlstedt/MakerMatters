@@ -1,4 +1,4 @@
-django~=4.2.0
+django~=5.2.0
 requests~=2.32.3
 stripe~=9.8.0
 humanize~=4.9.0
@@ -6,9 +6,8 @@ django-constance~=4.3.0
 django-cors-headers~=4.9.0
 black==25.1.0
 pre-commit==3.7.1
-djangorestframework~=3.17.0
+djangorestframework~=3.18.0
 djangorestframework-simplejwt~=5.5.0
-django-csp~=3.8
 sentry-sdk==2.3.1
 mysqlclient~=2.2.4
 git+https://github.com/mailchimp/mailchimp-marketing-python.git
@@ -19,7 +18,7 @@ postmarker~=1.0
 channels_redis~=4.3.0
 ics~=0.7.2
 python_http_client~=3.3.7
-pwned-passwords-django~=2.1
+pwned-passwords-django~=5.2.0
 celery~=5.4.0
 django-celery-results~=2.6.0
 django-celery-beat~=2.9.0
