@@ -328,3 +328,47 @@ def make_tier_and_plan(db):
         return tier, plan
 
     return _make
+
+
+@pytest.fixture
+def as_admin(api_client, make_member):
+    """Authenticate as a staff user.
+
+    ``permissions.IsAdminUser`` checks ``request.user.is_staff``, which on this
+    project's custom User model is a property returning the ``staff`` boolean.
+    """
+
+    created = {}
+
+    def _login(profile=None):
+        if profile is None:
+            # Reuse the same admin across repeated calls in one test; creating a
+            # second one would collide on the unique rfid.
+            profile = created.get("admin")
+            if profile is None:
+                profile = make_member(state="active", rfid="ADMIN-TAG")
+                created["admin"] = profile
+        profile.user.staff = True
+        profile.user.save()
+        api_client.force_authenticate(user=profile.user)
+        api_client.admin_profile = profile
+        return api_client
+
+    return _login
+
+
+@pytest.fixture
+def with_api_key(api_client):
+    """Authenticate with a generic DRF API key instead of a session.
+
+    Several admin endpoints accept ``IsAdminUser | HasAPIKey``, which is how
+    external tooling reads member and billing data.
+    """
+    from rest_framework_api_key.models import APIKey
+
+    def _auth():
+        _obj, raw_key = APIKey.objects.create_key(name="test-integration")
+        api_client.credentials(HTTP_AUTHORIZATION=f"Api-Key {raw_key}")
+        return api_client
+
+    return _auth

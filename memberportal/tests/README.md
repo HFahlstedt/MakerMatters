@@ -38,6 +38,10 @@ opens the log file at import time.
 | `test_stripe_webhook.py` | The asynchronous route into membership: `invoice.paid`, `invoice.payment_failed`, `customer.subscription.deleted`, customer resolution and signature verification. |
 | `test_billing_subscriptions.py` | Card storage, tier listing, plan signup, cancel/resume. |
 | `test_boot.py` | Entry-point modules, the URL conf, system checks and migration drift — the failures that only appear at process start. |
+| `test_admin_devices.py` | The three near-identical device CRUD classes, their per-type statistics, and the default-access side effects. |
+| `test_admin_members.py` | Member list, activation, promotion, profile editing, access review, logs and billing info. |
+| `test_admin_tiers_and_settings.py` | Tier and plan CRUD against Stripe, plus the Constance settings API. |
+| `test_access_admin_endpoints.py` | Grant/revoke, the remote device commands, and the externally callable API-key subset. |
 
 ## Conventions
 
@@ -69,6 +73,20 @@ never automatically. If a test fails against it, either the change was intended
 — update the golden file in the same commit and say why in the message — or the
 upgrade broke something.
 
+## Response shapes are asserted exactly
+
+The admin tests compare the full set of keys in each response, not a handful of
+spot-checks. That is deliberate: the planned refactor replaces hand-built
+response dicts with serializers, and the failure mode of that change is a
+quietly dropped or renamed field rather than an exception. `set(body[0]) ==
+DOOR_FIELDS` catches it; `assert body[0]["name"] == ...` does not.
+
+The same reasoning drives
+`test_the_three_device_shapes_have_drifted`, which pins the *differences*
+between the door, interlock and vending payloads. They have already diverged,
+and any consolidation must be a deliberate API decision rather than a
+side effect.
+
 ## Not yet covered
 
 The next batch worth writing, in rough priority order:
@@ -77,6 +95,5 @@ The next batch worth writing, in rough priority order:
    one regression here by hand (the dropped `state` column); a round-trip test
    would have caught it automatically.
 2. Session and JWT auth flows end to end, including the Discourse SSO handshake.
-3. `Profile.get_access_permissions()`, which is on a hot member-facing path.
-4. The admin device CRUD endpoints (three near-identical classes that are prime
-   refactor targets, so worth pinning before they are merged).
+3. The member-facing tools endpoints (`/api/tools/*`) and meetings/proxies.
+4. Anything on the frontend, which has no test runner at all.

@@ -5,6 +5,7 @@ from asgiref.sync import async_to_sync
 from channels.layers import get_channel_layer
 from constance import config
 from constance.models import Constance as ConstanceSetting
+from constance.codecs import dumps as constance_dumps, loads as constance_loads
 from django.db.models import F, Sum, Value, CharField, Count, Max
 from django.db.models.functions import Concat
 from django.db.utils import OperationalError
@@ -903,9 +904,20 @@ class ManageSettings(APIView):
     permission_classes = (permissions.IsAdminUser,)
 
     def get_setting(self, setting):
+        # django-constance 4 stores values as a JSON envelope
+        # ({"__type__": ..., "__value__": ...}) in a plain TextField. Up to
+        # constance 2.x the column was a PickledObjectField, which decoded on
+        # attribute access, so `setting.value` was the Python value. Decode
+        # explicitly to keep this endpoint returning what it always returned.
+        try:
+            value = constance_loads(setting.value)
+        except (ValueError, TypeError):
+            # A row written before the codec existed, or hand-edited.
+            value = setting.value
+
         return {
             "key": setting.key,
-            "value": setting.value,
+            "value": value,
         }
 
     def get(self, request, setting_key=None):
@@ -933,7 +945,7 @@ class ManageSettings(APIView):
 
         try:
             setting = ConstanceSetting.objects.get(key=setting_key)
-            setting.value = body["value"]
+            setting.value = constance_dumps(body["value"])
             setting.save()
 
             return Response(self.get_setting(setting))
