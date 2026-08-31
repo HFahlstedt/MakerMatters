@@ -71,7 +71,10 @@
                 </q-input>
 
                 <div class="column">
-                  <div class="row items-center">
+                  <div
+                    class="row items-center"
+                    v-if="deviceType !== 'memberbucks-devices'"
+                  >
                     <q-checkbox
                       v-model="device.defaultAccess"
                       :label="$t('access.defaultAccess')"

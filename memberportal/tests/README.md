@@ -1,24 +1,27 @@
 # Characterisation test suite
 
-These tests describe how the system behaves **today**, on Django 3.2. They are
-the acceptance criteria for the planned Django 4.2 → 5.2 upgrade: green before
-the upgrade, green after it.
+These tests describe how the system behaves today. They were written against
+Django 3.2 as the acceptance criteria for the 4.2 → 5.2 upgrade — green before,
+green after — and now serve the same role for the refactoring that follows.
 
 That framing matters when reading them. Where a test pins behaviour that is
 plainly wrong it is labelled `DEFECT, pinned`, and is paired with a
 `@pytest.mark.xfail(strict=True)` test describing what the behaviour *should*
 be. When someone fixes the defect the xfail flips to XPASS and the suite fails
-loudly, forcing both tests to be updated together. Four defects found this way
-have since been fixed and their xfails removed; three remain pinned as
-`DEFECT, pinned` without a paired xfail, because the correct behaviour is a
-product decision rather than an obvious bug:
+loudly, forcing both tests to be updated together.
 
-- a brand-new member is rate-limited out of their first vending purchase,
-  because `last_memberbucks_purchase` defaults to *now* at signup
+Every defect found this way has since been fixed, and each of those tests now
+asserts the corrected behaviour while its docstring records what it used to do
+and why. Two things are still pinned as wrong, because fixing either needs a
+decision rather than a patch:
+
 - `/api/billing/access-card/` accepts any unused tag with no proof the member
-  holds that card, and a duplicate surfaces as an unhandled `IntegrityError`
-- the Stripe webhook's customer lookup catches only `DoesNotExist`, so an event
-  with an empty customer field raises `MultipleObjectsReturned`
+  holds that card. A duplicate is now rejected with a 400, but proving
+  ownership needs a verification flow — swipe the card at a reader — not a
+  uniqueness check.
+- `AccessControlledDevice.all_members` is a column on every device type, but
+  vending machines have no per-member access list for it to gate. The admin
+  API no longer exposes it for that type; the column remains.
 
 ## Running
 

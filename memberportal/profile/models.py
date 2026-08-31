@@ -358,7 +358,12 @@ class Profile(ExportModelOperationsMixin("profile"), models.Model):
     doors = models.ManyToManyField("access.Doors", blank=True)
     interlocks = models.ManyToManyField("access.Interlock", blank=True)
     memberbucks_balance = models.FloatField(default=0.0)
-    last_memberbucks_purchase = models.DateTimeField(default=timezone.now)
+    # Null until the member actually spends something. It used to default to
+    # the signup time, which made "never purchased" indistinguishable from
+    # "purchased just now" and rate limited every member's first purchase.
+    last_memberbucks_purchase = models.DateTimeField(
+        null=True, blank=True, default=None
+    )
     must_update_profile = models.BooleanField(default=False)
     exclude_from_email_export = models.BooleanField(default=False)
 

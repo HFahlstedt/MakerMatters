@@ -13,16 +13,19 @@ from rest_framework.views import APIView
 from constance import config
 
 
-def get_device(door_id=None, interlock_id=None):
+def get_device(door_id=None, interlock_id=None, memberbucks_device_id=None):
     """Resolve the device a URL refers to.
 
-    Several of these routes are registered for both doors and interlocks, so
+    Several of these routes are registered for more than one device type, so
     which keyword argument arrives depends on which path matched.
     """
     if door_id is not None:
         return Doors.objects.get(pk=door_id)
 
-    return Interlock.objects.get(pk=interlock_id)
+    if interlock_id is not None:
+        return Interlock.objects.get(pk=interlock_id)
+
+    return MemberbucksDevice.objects.get(pk=memberbucks_device_id)
 
 
 class AccessSystemStatus(APIView):
@@ -155,8 +158,14 @@ class DeviceCommandView(APIView):
     #: Name of the model method that records it against the device.
     audit = None
 
-    def post(self, request, door_id=None, interlock_id=None):
-        device = get_device(door_id=door_id, interlock_id=interlock_id)
+    def post(
+        self, request, door_id=None, interlock_id=None, memberbucks_device_id=None
+    ):
+        device = get_device(
+            door_id=door_id,
+            interlock_id=interlock_id,
+            memberbucks_device_id=memberbucks_device_id,
+        )
 
         getattr(device, self.audit)()
         result = getattr(device, self.command)(request=request)

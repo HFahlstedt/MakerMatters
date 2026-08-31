@@ -206,26 +206,28 @@ async def test_purchases_are_rate_limited_to_one_per_three_seconds(
     await comm.disconnect()
 
 
-async def test_a_brand_new_member_is_rate_limited_out_of_their_first_purchase(
-    vending_with_member, device_api_key
+async def test_a_brand_new_member_can_make_their_first_purchase(
+    vending_with_member, device_api_key, sent_emails
 ):
-    """DEFECT, pinned: ``last_memberbucks_purchase`` defaults to *now* at signup.
+    """``last_memberbucks_purchase`` used to default to *now* at signup.
 
-    The rate-limit check compares against it unconditionally, so a member who
-    has never spent anything is blocked for the first three seconds of their
-    existence. Harmless in practice, but it means "never purchased" and
-    "purchased just now" are indistinguishable.
+    The rate-limit check compared against it unconditionally, so a member who
+    had never spent anything was blocked for the first three seconds of their
+    existence. It is null until the first purchase now, so "never purchased"
+    and "purchased just now" are distinguishable.
     """
-    _device, _profile = await ws.aget(vending_with_member)(
+    _device, profile = await ws.aget(vending_with_member)(
         serial="vend-fresh", balance_dollars=500
     )
+
+    assert await ws.aget(lambda: profile.last_memberbucks_purchase)() is None
 
     comm, _ = await ws.open_authenticated("memberbucks", "vend-fresh", device_api_key)
     await comm.send_json_to({"command": "debit", "card_id": "TAG-VEND", "amount": 100})
 
-    assert await comm.receive_json_from(timeout=ws.TIMEOUT) == {
-        "command": "rate_limited"
-    }
+    reply = await comm.receive_json_from(timeout=ws.TIMEOUT)
+    assert reply["command"] == "debit"
+    assert reply["success"] is True
     await comm.disconnect()
 
 

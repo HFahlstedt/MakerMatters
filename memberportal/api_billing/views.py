@@ -378,7 +378,20 @@ class AssignAccessCard(APIView):
 
     def post(self, request):
         profile = request.user.profile
-        profile.rfid = request.data["accessCard"]
+        access_card = request.data["accessCard"]
+
+        # Profile.rfid is unique, so a clash used to surface as an unhandled
+        # IntegrityError. Note this still does not verify that the member
+        # actually holds the card they are claiming — see AssignAccessCard in
+        # tests/test_signup_pipeline.py.
+        clash = Profile.objects.filter(rfid=access_card).exclude(pk=profile.pk)
+        if access_card and clash.exists():
+            return Response(
+                {"success": False, "error": "accessCardInUse"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        profile.rfid = access_card
         profile.save()
 
         return Response({"success": True})
@@ -715,10 +728,18 @@ class StripeWebhook(StripeAPIView):
             event_type = request_data["type"]
 
         data = data["object"]
-        try:
-            member_profile = Profile.objects.get(stripe_customer_id=data["customer"])
 
-        except Profile.DoesNotExist as e:
+        # stripe_customer_id defaults to the empty string and is not unique, so
+        # an event carrying no customer would otherwise match every member who
+        # has never saved a card.
+        customer_id = data.get("customer")
+        if not customer_id:
+            return Response()
+
+        try:
+            member_profile = Profile.objects.get(stripe_customer_id=customer_id)
+
+        except (Profile.DoesNotExist, Profile.MultipleObjectsReturned) as e:
             capture_exception(e)
             return Response()
 

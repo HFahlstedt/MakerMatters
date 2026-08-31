@@ -64,7 +64,8 @@ MEMBERBUCKS_FIELDS = {
     "ipAddress",
     "lastSeen",
     "offline",
-    "defaultAccess",
+    # No `defaultAccess`: a vending machine has no per-member access list, so
+    # the flag had no mechanism behind it and was removed from this endpoint.
     "maintenanceLockout",
     "playThemeOnSwipe",
     "exemptFromSignin",
@@ -139,6 +140,10 @@ def test_the_three_device_shapes_have_drifted(
     # Only doors omit `authorised`, despite every device type having the field.
     assert "authorised" not in door
     assert interlock["authorised"] is True and vending["authorised"] is True
+
+    # Only the two types with a per-member access list offer the toggle.
+    assert "defaultAccess" in door and "defaultAccess" in interlock
+    assert "defaultAccess" not in vending
 
     # Each type reports a different usage statistic.
     assert "totalSwipes" in door

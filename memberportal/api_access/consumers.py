@@ -562,12 +562,13 @@ class MemberbucksConsumer(AccessDeviceConsumer):
                 )
                 return True
 
-            time_dif = (
-                timezone.now() - profile.last_memberbucks_purchase
-            ).total_seconds()
-
-            # We have a hard rate limit of one transaction every 3 seconds at most
-            if time_dif > 3:
+            # We have a hard rate limit of one transaction every 3 seconds at
+            # most. A member who has never made a purchase is not rate limited.
+            last_purchase = profile.last_memberbucks_purchase
+            if (
+                last_purchase is None
+                or (timezone.now() - last_purchase).total_seconds() > 3
+            ):
                 signed_dollars = (
                     amount_dollars if command == "credit" else -amount_dollars
                 )

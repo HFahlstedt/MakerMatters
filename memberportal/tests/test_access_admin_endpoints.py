@@ -184,19 +184,29 @@ def test_syncing_a_door(as_admin, make_door, capture_channel_sends):
     assert "sync_users" in capture_channel_sends
 
 
-def test_there_is_no_sync_route_for_interlocks(as_admin, make_interlock):
-    """DEFECT, pinned: the admin frontend calls this URL for every device type.
+@pytest.mark.parametrize(
+    "device_kind,fixture_name",
+    [
+        ("doors", "make_door"),
+        ("interlocks", "make_interlock"),
+        ("memberbucks-devices", "make_memberbucks_device"),
+    ],
+)
+def test_every_device_type_has_a_sync_route(
+    request, as_admin, capture_channel_sends, device_kind, fixture_name
+):
+    """``AdminTools/DeviceDialog.vue`` builds the path from the device type.
 
-    ``AdminTools/DeviceDialog.vue`` builds the path from the device type, so
-    pressing "sync" on an interlock or vending machine requests a route that
-    was never registered.
+    Only the door route used to exist, so pressing "sync" on an interlock or a
+    vending machine requested a URL that was never registered and got a 404.
     """
-    interlock = make_interlock(serial="cmd-nosync")
+    device = request.getfixturevalue(fixture_name)(serial=f"cmd-sync-{device_kind}")
 
-    assert (
-        as_admin().post(f"/api/access/interlocks/{interlock.id}/sync/").status_code
-        == 404
-    )
+    response = as_admin().post(f"/api/access/{device_kind}/{device.id}/sync/")
+
+    assert response.status_code == 200
+    assert response.json() == {"success": True}
+    assert "sync_users" in capture_channel_sends
 
 
 @pytest.mark.parametrize("device_kind", ["doors", "interlocks"])
@@ -211,8 +221,7 @@ def test_rebooting_a_device(
 
     body = as_admin().post(f"/api/access/{device_kind}/{device.id}/reboot/").json()
 
-    # `success` is null here too — see the lock/unlock test below.
-    assert body == {"success": None}
+    assert body == {"success": True}
     assert "device_reboot" in capture_channel_sends
 
 
@@ -235,7 +244,7 @@ def test_bumping_a_door_without_a_serial_number_reports_failure(as_admin, make_d
 
 @pytest.mark.parametrize("command", ["lock", "unlock"])
 @pytest.mark.parametrize("device_kind", ["doors", "interlocks"])
-def test_lock_and_unlock_report_success_as_null(
+def test_lock_and_unlock_report_whether_the_command_was_sent(
     as_admin,
     make_door,
     make_interlock,
@@ -243,19 +252,13 @@ def test_lock_and_unlock_report_success_as_null(
     command,
     device_kind,
 ):
-    """DEFECT, pinned: ``success`` is meaningless for most remote commands.
+    """``success`` means the same thing for all five commands.
 
-    Three of the five device commands have no return statement, yet every view
-    wraps the result as ``{"success": <returned value>}``:
-
-        sync()   -> True          (always, even with no serial number)
-        bump()   -> True / False  (the only honest one)
-        reboot() -> None
-        lock()   -> None
-        unlock() -> None
-
-    So a caller cannot distinguish a lock that reached the device from one
-    that silently did nothing because the device has no serial number.
+    Only ``bump()`` used to return anything meaningful. ``reboot()``,
+    ``lock()`` and ``unlock()`` had no return statement at all and reported
+    ``null``, while ``sync()`` returned True unconditionally — so a caller
+    could not tell a command that reached the device from one that silently
+    did nothing because the device has no serial number.
     """
     serial = f"cmd-{command}-{device_kind}"
     device = (
@@ -266,7 +269,7 @@ def test_lock_and_unlock_report_success_as_null(
 
     body = as_admin().post(f"/api/access/{device_kind}/{device.id}/{command}/").json()
 
-    assert body == {"success": None}
+    assert body == {"success": True}
     assert f"device_{command}" in capture_channel_sends
 
 
@@ -288,34 +291,50 @@ def test_the_bump_api_is_disabled_by_default(external_key_client, make_door):
     }
 
 
-def test_bumping_with_an_external_key_crashes_when_enabled(
+def test_bumping_with_an_external_key_works_when_enabled(
     external_key_client, make_door, set_config, capture_channel_sends
 ):
-    """DEFECT, pinned: the one endpoint built for third parties cannot be used.
+    """The one endpoint built for third parties is usable by third parties.
 
-    ``Doors.bump()`` treats a non-None ``request`` as proof there is a logged-in
-    user and immediately reads ``request.user.profile``. An API-key request is
-    anonymous, so this raises ``AttributeError``. The ``else`` branch that
-    handles an unknown "system" caller is unreachable, because the view always
-    passes the request through.
+    ``Doors.bump()`` used to treat a non-None ``request`` as proof there was a
+    logged-in user and read ``request.user.profile`` straight away. An API-key
+    request is anonymous, so the endpoint raised ``AttributeError`` for exactly
+    the callers it exists to serve, and the ``else`` branch handling an unknown
+    "system" caller was unreachable.
     """
+    from profile.models import EventLog
+
     set_config(ENABLE_DOOR_BUMP_API=True)
     door = make_door(serial="ext-bump-on")
 
-    with pytest.raises(AttributeError):
-        external_key_client().post(f"/api/access/doors/{door.id}/bump/")
+    response = external_key_client().post(f"/api/access/doors/{door.id}/bump/")
+
+    assert response.status_code == 200
+    assert response.json() == {"success": True}
+    assert "door_bump" in capture_channel_sends
+    # Attributed to nobody, but recorded.
+    assert EventLog.objects.filter(description__startswith="Unknown user").exists()
 
 
 @pytest.mark.parametrize("command", ["lock", "unlock"])
-def test_lock_and_unlock_with_an_external_key_also_crash(
+def test_lock_and_unlock_with_an_external_key_also_work(
     external_key_client, make_door, set_config, capture_channel_sends, command
 ):
-    """Same root cause: ``request.user.log_event`` on an anonymous request."""
+    """Same root cause, since ``request.user.log_event`` was equally unguarded.
+
+    There is no admin to attribute the command to, so no user event log entry
+    is written — the device's own event log still records it.
+    """
+    from profile.models import UserEventLog
+
     set_config(ENABLE_DOOR_BUMP_API=True)
     door = make_door(serial=f"ext-{command}")
 
-    with pytest.raises(AttributeError):
-        external_key_client().post(f"/api/access/doors/{door.id}/{command}/")
+    response = external_key_client().post(f"/api/access/doors/{door.id}/{command}/")
+
+    assert response.json() == {"success": True}
+    assert f"device_{command}" in capture_channel_sends
+    assert not UserEventLog.objects.exists()
 
 
 def test_remote_commands_reject_anonymous_callers(api_client, make_door):

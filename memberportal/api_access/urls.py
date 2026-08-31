@@ -48,6 +48,16 @@ urlpatterns = [
         name="SyncDoor",
     ),
     path(
+        "api/access/interlocks/<int:interlock_id>/sync/",
+        views.SyncDevice.as_view(),
+        name="SyncInterlock",
+    ),
+    path(
+        "api/access/memberbucks-devices/<int:memberbucks_device_id>/sync/",
+        views.SyncDevice.as_view(),
+        name="SyncMemberbucksDevice",
+    ),
+    path(
         "api/access/doors/<int:door_id>/bump/",
         views.BumpDoor.as_view(),
         name="BumpDoor",

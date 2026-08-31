@@ -187,16 +187,15 @@ def test_plans_can_be_listed_for_one_tier(as_admin, make_tier_and_plan, set_conf
     assert [p["id"] for p in body] == [plan.id]
 
 
-def test_the_admin_read_path_reports_cost_in_dollars(
+def test_both_read_paths_report_cost_in_the_same_unit(
     as_admin, make_tier_and_plan, set_config
 ):
-    """``/api/admin/plans/`` divides by 100; ``/api/billing/tiers/`` does not.
+    """``/api/admin/plans/`` and ``/api/billing/tiers/`` agree.
 
-    ``PaymentPlan.cost`` is cents. ``ManageMembershipTierPlan.get_plan()``
-    converts to dollars, but ``PaymentPlan.get_object()`` — used by the
-    member-facing tier list and by the subscription endpoints — returns the raw
-    cents value. The same plan therefore reports two different numbers
-    depending on which endpoint you ask.
+    ``PaymentPlan.cost`` is cents, and so are ``PaymentPlan.get_object()`` and
+    the admin create path. ``ManageMembershipTierPlan.get_plan()`` used to be
+    the sole exception, dividing by 100, so the same plan reported two
+    different numbers depending on which endpoint you asked.
     """
     set_config(ENABLE_STRIPE=True)
     _tier, plan = make_tier_and_plan(cost=2500)
@@ -204,7 +203,7 @@ def test_the_admin_read_path_reports_cost_in_dollars(
     admin_view = as_admin().get(f"/api/admin/plans/{plan.id}/").json()
     member_view = as_admin().get("/api/billing/tiers/").json()[0]["plans"][0]
 
-    assert admin_view["cost"] == 25.0  # dollars
+    assert admin_view["cost"] == 2500  # cents
     assert member_view["cost"] == 2500  # cents
 
 
@@ -246,15 +245,15 @@ def test_creating_a_plan_also_creates_a_stripe_price(
     assert kwargs["product"] == tier.stripe_id
 
 
-def test_editing_a_plan_through_the_admin_api_divides_its_price_by_100(
+def test_editing_a_plan_and_saving_it_back_leaves_the_price_alone(
     as_admin, make_tier_and_plan, set_config
 ):
-    """DEFECT, pinned: the read and write paths disagree about units.
+    """The read and write paths agree about units.
 
-    ``get_plan()`` returns ``cost / 100`` while ``put()`` stores ``body["cost"]``
-    verbatim. An admin screen that loads a plan and saves it back unchanged
-    therefore turns 2500 cents ($25.00) into 25 cents — and repeating the edit
-    keeps dividing. Nothing in the write path validates or rescales the value.
+    ``get_plan()`` used to return ``cost / 100`` while ``put()`` stored
+    ``body["cost"]`` verbatim, so loading a plan and saving it back unchanged
+    turned 2500 cents ($25.00) into 25 cents — and repeating the edit kept
+    dividing.
     """
     from api_admin_tools.models import PaymentPlan
 
@@ -263,7 +262,7 @@ def test_editing_a_plan_through_the_admin_api_divides_its_price_by_100(
     client = as_admin()
 
     loaded = client.get(f"/api/admin/plans/{plan.id}/").json()
-    assert loaded["cost"] == 25.0
+    assert loaded["cost"] == 2500
 
     # Save it back untouched, exactly as an edit form would.
     client.put(
@@ -272,7 +271,7 @@ def test_editing_a_plan_through_the_admin_api_divides_its_price_by_100(
         format="json",
     )
 
-    assert PaymentPlan.objects.get(pk=plan.id).cost == 25
+    assert PaymentPlan.objects.get(pk=plan.id).cost == 2500
 
 
 def test_updating_a_plan_does_not_touch_stripe(
@@ -382,24 +381,59 @@ def test_updating_without_a_key_is_rejected(as_admin):
     )
 
 
-def test_setting_values_are_not_type_checked(as_admin, set_config):
-    """DEFECT, pinned: the endpoint writes whatever type it is given.
+def test_a_setting_rejects_a_value_of_the_wrong_type(as_admin, set_config):
+    """The endpoint used to write whatever type it was given.
 
-    ``ENABLE_STRIPE`` is declared as a boolean, but a string round-trips
+    ``ENABLE_STRIPE`` is declared as a boolean, but a string round-tripped
     through the codec unchanged. Every ``config.ENABLE_STRIPE`` check in the
-    codebase then evaluates a non-empty string as truthy, so the string
-    "false" silently *enables* Stripe.
+    codebase then read a non-empty string as truthy, so the string "false"
+    silently *enabled* Stripe.
     """
     from constance import config
 
     set_config(ENABLE_STRIPE=True)
 
-    as_admin().put(
+    response = as_admin().put(
         "/api/admin/settings/ENABLE_STRIPE/", {"value": "false"}, format="json"
     )
 
-    assert config.ENABLE_STRIPE == "false"
-    assert bool(config.ENABLE_STRIPE) is True
+    assert response.status_code == 400
+    assert config.ENABLE_STRIPE is True
+
+
+def test_a_setting_accepts_a_value_of_the_declared_type(as_admin, set_config):
+    from constance import config
+
+    set_config(ENABLE_STRIPE=True)
+
+    response = as_admin().put(
+        "/api/admin/settings/ENABLE_STRIPE/", {"value": False}, format="json"
+    )
+
+    assert response.status_code == 200
+    assert config.ENABLE_STRIPE is False
+
+
+def test_an_integer_is_accepted_for_a_setting_declared_as_a_float(as_admin, set_config):
+    """JSON does not distinguish 2 from 2.0, so the check must not either."""
+    from django.conf import settings as django_settings
+
+    float_keys = [
+        key
+        for key, declared in django_settings.CONSTANCE_CONFIG.items()
+        if isinstance(declared[0], float)
+    ]
+    assert float_keys, "expected at least one float setting to exercise this"
+    key = float_keys[0]
+
+    set_config(**{key: 1.5})
+
+    assert (
+        as_admin()
+        .put(f"/api/admin/settings/{key}/", {"value": 2}, format="json")
+        .status_code
+        == 200
+    )
 
 
 def test_settings_are_returned_decoded_not_as_a_storage_envelope(as_admin, set_config):

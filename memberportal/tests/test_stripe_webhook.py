@@ -261,28 +261,50 @@ def test_events_for_unknown_customers_are_silently_accepted(
     assert response.status_code == 200
 
 
-def test_ambiguous_customer_lookup_is_unguarded(make_member, api_client, set_config):
-    """DEFECT, pinned: only ``DoesNotExist`` is caught, not ``MultipleObjectsReturned``.
+def test_an_event_with_no_customer_is_ignored(make_member, api_client, set_config):
+    """``stripe_customer_id`` defaults to the empty string and is not unique.
 
-    ``stripe_customer_id`` defaults to the empty string and is not unique, so
-    every member who has never saved a card shares that value. An event whose
-    customer field is empty therefore raises rather than being ignored.
+    Every member who has never saved a card shares that value, so an event
+    whose customer field is empty matched all of them at once. Only
+    ``DoesNotExist`` was caught, so the lookup raised instead of being ignored.
     """
-    from profile.models import Profile
-
     set_config(STRIPE_WEBHOOK_SECRET="")
     make_member(state="active", rfid="TAG-A")
     make_member(state="active", rfid="TAG-B")
 
-    with pytest.raises(Profile.MultipleObjectsReturned):
-        api_client.post(
-            WEBHOOK_URL,
-            {
-                "type": "invoice.paid",
-                "data": {"object": {"customer": "", "status": "paid"}},
-            },
-            format="json",
-        )
+    response = api_client.post(
+        WEBHOOK_URL,
+        {
+            "type": "invoice.paid",
+            "data": {"object": {"customer": "", "status": "paid"}},
+        },
+        format="json",
+    )
+
+    assert response.status_code == 200
+
+
+def test_an_ambiguous_customer_lookup_is_ignored_rather_than_raising(
+    make_member, api_client, set_config, monkeypatch
+):
+    """A duplicate customer id must not take the webhook down either."""
+    from profile.models import Profile
+
+    set_config(STRIPE_WEBHOOK_SECRET="")
+    for tag in ("TAG-C", "TAG-D"):
+        member = make_member(state="active", rfid=tag)
+        Profile.objects.filter(pk=member.pk).update(stripe_customer_id="cus_dupe")
+
+    response = api_client.post(
+        WEBHOOK_URL,
+        {
+            "type": "invoice.paid",
+            "data": {"object": {"customer": "cus_dupe", "status": "paid"}},
+        },
+        format="json",
+    )
+
+    assert response.status_code == 200
 
 
 def test_a_configured_secret_makes_the_signature_authoritative(

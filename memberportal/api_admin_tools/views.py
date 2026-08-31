@@ -6,6 +6,7 @@ from channels.layers import get_channel_layer
 from constance import config
 from constance.models import Constance as ConstanceSetting
 from constance.codecs import dumps as constance_dumps, loads as constance_loads
+from django.conf import settings as django_settings
 from django.db.models import F, Sum, Value, CharField, Count, Max
 from django.db.models.functions import Concat
 from django.db.utils import OperationalError
@@ -449,7 +450,9 @@ class MemberbucksDevices(APIView):
                 "ipAddress": device.ip_address,
                 "lastSeen": device.last_seen,
                 "offline": device.get_unavailable(),
-                "defaultAccess": device.all_members,
+                # No `defaultAccess`: every active member may use a vending
+                # machine and there is no per-member link table for this type,
+                # so the flag had no mechanism behind it in either position.
                 "maintenanceLockout": device.locked_out,
                 "playThemeOnSwipe": device.play_theme,
                 "exemptFromSignin": device.exempt_signin,
@@ -470,7 +473,6 @@ class MemberbucksDevices(APIView):
         device.description = data.get("description")
         device.ip_address = data.get("ipAddress")
 
-        device.all_members = data.get("defaultAccess")
         device.locked_out = data.get("maintenanceLockout")
         device.play_theme = data.get("playThemeOnSwipe")
         device.exempt_signin = data.get("exemptFromSignin")
@@ -689,7 +691,7 @@ class ManageMembershipTierPlan(StripeAPIView):
             "memberTier": plan.member_tier.id,
             "visible": plan.visible,
             "currency": plan.currency,
-            "cost": plan.cost / 100,  # convert to dollars
+            "cost": plan.cost,  # cents, matching the model and the create path
             "intervalCount": plan.interval_count,
             "interval": plan.interval,
         }
@@ -761,7 +763,7 @@ class ManageMembershipTierPlan(StripeAPIView):
 
         plan.name = body["name"]
         plan.visible = body["visible"]
-        plan.cost = body["cost"]
+        plan.cost = round(body["cost"])  # cents, as in post()
         plan.save()
 
         return Response(self.get_plan(plan))
@@ -937,11 +939,45 @@ class ManageSettings(APIView):
 
             return Response(settings)
 
+    @staticmethod
+    def matches_declared_type(value, default):
+        """Whether ``value`` may be stored for a setting declared with ``default``.
+
+        Constance takes the type of the declared default as the setting's type,
+        but stores whatever it is given. Without this check the string "false"
+        can be written to a boolean, and every ``config.X`` test in the codebase
+        then reads a non-empty string as True.
+
+        ``bool`` is checked before ``int`` because it is a subclass of it, and
+        an int is accepted for a float because JSON does not distinguish 2
+        from 2.0.
+        """
+        if isinstance(default, bool):
+            return isinstance(value, bool)
+
+        if isinstance(default, float):
+            return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+        if isinstance(default, int):
+            return isinstance(value, int) and not isinstance(value, bool)
+
+        return isinstance(value, type(default))
+
     def put(self, request, setting_key=None):
         if not setting_key:
             return Response(status=status.HTTP_400_BAD_REQUEST)
 
         body = request.data
+
+        declared = django_settings.CONSTANCE_CONFIG.get(setting_key)
+        if declared and not self.matches_declared_type(body["value"], declared[0]):
+            return Response(
+                {
+                    "error": f"{setting_key} is declared as "
+                    f"{type(declared[0]).__name__}."
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         try:
             setting = ConstanceSetting.objects.get(key=setting_key)

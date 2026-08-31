@@ -64,7 +64,7 @@ def test_a_vending_machine_authorises_every_active_member(
 def test_a_vending_machine_ignores_its_default_access_flag(
     make_memberbucks_device, make_member
 ):
-    """DEFECT, pinned: ``all_members`` is settable but inert on this type.
+    """DEFECT, pinned: ``all_members`` is a column with no meaning here.
 
     ``MemberbucksDevice`` used to declare ``all_members = True`` in its class
     body, which never took effect — Django writes the field's stored value into
@@ -73,10 +73,10 @@ def test_a_vending_machine_ignores_its_default_access_flag(
     stated by ``MemberbucksDevice.get_authorised_profiles``, which returns
     every active member regardless of the flag.
 
-    The admin API nonetheless reads and writes this field for vending machines
-    (``api_admin_tools/views.py`` — ``defaultAccess``), so the admin screen
-    offers a toggle that does nothing in either position. Both positions are
-    pinned here.
+    The admin API no longer exposes it for this type, since there is no
+    per-member vending access list for it to gate and switching it off could
+    only mean "nobody". The inherited column stays, so both positions are
+    pinned here: whatever it holds, the tag list is the same.
     """
     device = make_memberbucks_device(serial="hier-vend-flag", all_members=False)
     make_member(state="active", rfid="HIER-FLAG-1")

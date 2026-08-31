@@ -89,7 +89,7 @@
               label: 'Cost',
               field: 'cost',
               sortable: true,
-              format: (val) => `$${val}`,
+              format: (val) => `$${val / 100}`,
             },
             {
               name: 'interval',

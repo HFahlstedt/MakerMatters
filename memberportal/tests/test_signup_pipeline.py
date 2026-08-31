@@ -106,23 +106,41 @@ def test_assigning_an_access_card_stores_the_tag(make_member, as_member):
     assert Profile.objects.get(pk=profile.pk).rfid == "NEW-TAG-123"
 
 
-def test_assigning_a_card_already_held_by_another_member_raises(make_member, as_member):
-    """DEFECT, pinned: the endpoint performs no uniqueness check of its own.
+def test_assigning_a_card_already_held_by_another_member_is_rejected(
+    make_member, as_member
+):
+    """``Profile.rfid`` is unique, so the clash used to be an unhandled 500.
 
-    ``Profile.rfid`` is ``unique=True``, so the clash surfaces as an unhandled
-    IntegrityError (a 500) rather than a useful validation message. Worse, a
-    tag that IS free is accepted with no verification that the member actually
-    holds that card — anyone can claim any unused tag number.
+    DEFECT, still pinned: a tag that IS free is accepted with no verification
+    that the member actually holds that card, so anyone can claim any unused
+    tag number. Fixing that needs a verification flow (swipe the card at a
+    reader), not a uniqueness check.
     """
-    from django.db.utils import IntegrityError
+    from profile.models import Profile
 
     make_member(state="active", rfid="TAKEN-TAG")
     newcomer = make_member(state="noob", rfid=None)
 
-    with pytest.raises(IntegrityError):
-        as_member(newcomer).post(
-            "/api/billing/access-card/", {"accessCard": "TAKEN-TAG"}, format="json"
-        )
+    response = as_member(newcomer).post(
+        "/api/billing/access-card/", {"accessCard": "TAKEN-TAG"}, format="json"
+    )
+
+    assert response.status_code == 400
+    assert response.json() == {"success": False, "error": "accessCardInUse"}
+    assert Profile.objects.get(pk=newcomer.pk).rfid is None
+
+
+def test_resubmitting_the_card_a_member_already_holds_is_allowed(
+    make_member, as_member
+):
+    """The clash check must not treat the member's own tag as taken."""
+    member = make_member(state="active", rfid="MY-OWN-TAG")
+
+    response = as_member(member).post(
+        "/api/billing/access-card/", {"accessCard": "MY-OWN-TAG"}, format="json"
+    )
+
+    assert response.status_code == 200
 
 
 # --------------------------------------------------------------------------

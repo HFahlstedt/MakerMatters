@@ -187,67 +187,69 @@ class AccessControlledDevice(
         )
         metrics.device_force_unlocks_total.labels(**self.get_metrics_labels()).inc()
 
+    def log_admin_action(self, request, description):
+        """Record which admin sent a command, when there is one to record.
+
+        The externally callable commands authenticate with an API key rather
+        than a login, so there is no user to attribute the action to. The
+        device's own event log still records that it happened.
+        """
+        if request is not None and request.user.is_authenticated:
+            request.user.log_event(description, "admin")
+
+    def send_command(self, command, request=None, description=None):
+        """Push one command to this device, if we know how to reach it.
+
+        Returns whether the command was actually sent. A device with no serial
+        number has no channel group to send to, so nothing happens — and the
+        caller is told so rather than being given an unconditional success.
+        """
+        if not self.serial_number:
+            logger.info(f"Not sending {command} to {self.name}: no serial number.")
+            return False
+
+        async_to_sync(get_channel_layer().group_send)(
+            self.serial_number, {"type": command}
+        )
+        self.log_admin_action(request, description)
+
+        return True
+
     def sync(self, request=None):
         logger.info("Sending device sync to channels for {}".format(self.serial_number))
 
-        if self.serial_number:
-            channel_layer = get_channel_layer()
-            async_to_sync(channel_layer.group_send)(
-                self.serial_number, {"type": "sync_users"}
-            )
-
-            if request:
-                request.user.log_event(
-                    f"Sent a sync request to the {self.name} {self._meta.verbose_name}.",
-                    "admin",
-                )
-
-        return True
+        return self.send_command(
+            "sync_users",
+            request,
+            f"Sent a sync request to the {self.name} {self._meta.verbose_name}.",
+        )
 
     def lock(self, request=None):
         logger.info(f"Sending device lock to channels for {self.name}")
 
-        if self.serial_number:
-            channel_layer = get_channel_layer()
-            async_to_sync(channel_layer.group_send)(
-                self.serial_number, {"type": "device_lock"}
-            )
-
-            if request:
-                request.user.log_event(
-                    f"Sent a lock request to the {self.name} {self._meta.verbose_name}.",
-                    "admin",
-                )
+        return self.send_command(
+            "device_lock",
+            request,
+            f"Sent a lock request to the {self.name} {self._meta.verbose_name}.",
+        )
 
     def unlock(self, request=None):
         logger.info(f"Sending device unlock to channels for {self.name}")
 
-        if self.serial_number:
-            channel_layer = get_channel_layer()
-            async_to_sync(channel_layer.group_send)(
-                self.serial_number, {"type": "device_unlock"}
-            )
-
-            if request:
-                request.user.log_event(
-                    f"Sent an unlock request to the {self.name} {self._meta.verbose_name}.",
-                    "admin",
-                )
+        return self.send_command(
+            "device_unlock",
+            request,
+            f"Sent an unlock request to the {self.name} {self._meta.verbose_name}.",
+        )
 
     def reboot(self, request=None):
         logger.info(f"Sending device reboot to channels for {self.name}")
 
-        if self.serial_number:
-            channel_layer = get_channel_layer()
-            async_to_sync(channel_layer.group_send)(
-                self.serial_number, {"type": "device_reboot"}
-            )
-
-            if request:
-                request.user.log_event(
-                    f"Sent a reboot request to the {self.name} {self._meta.verbose_name}.",
-                    "admin",
-                )
+        return self.send_command(
+            "device_reboot",
+            request,
+            f"Sent a reboot request to the {self.name} {self._meta.verbose_name}.",
+        )
 
     def on_authenticated(self):
         """Hook for state a device type must reconcile when it (re)connects.
@@ -338,7 +340,7 @@ class Doors(ExportModelOperationsMixin("door"), AccessControlledDevice):
                 self.serial_number, {"type": "door_bump"}
             )
 
-            if request:
+            if request is not None and request.user.is_authenticated:
                 # notify messaging apps of bump
                 profile = request.user.profile
                 if self.post_to_slack:
