@@ -257,7 +257,7 @@ class PaymentPlanSignup(StripeAPIView):
                     },
                 )
 
-                return self.create_subscription(attempts)
+                return self.create_subscription(request, new_plan, attempts)
 
             if (
                 error["code"] == "resource_missing"
@@ -315,6 +315,12 @@ class PaymentPlanSignup(StripeAPIView):
             return Response({"success": False}, status=status.HTTP_409_CONFLICT)
 
         new_subscription = self.create_subscription(request, new_plan)
+
+        # create_subscription() returns a ready-made error Response when it has
+        # exhausted its retries; pass it straight through rather than treating it
+        # as a Stripe object.
+        if isinstance(new_subscription, Response):
+            return new_subscription
 
         try:
             if new_subscription.status == "active":
@@ -540,6 +546,9 @@ class PaymentPlanResumeCancel(StripeAPIView):
                 new_subscription = PaymentPlanSignup().create_subscription(
                     request, current_plan
                 )
+
+                if isinstance(new_subscription, Response):
+                    return new_subscription
 
                 try:
                     if new_subscription.status == "active":
@@ -777,13 +786,15 @@ class StripeWebhook(StripeAPIView):
                 # already had this sent)
                 if member_profile.state != "noob":
                     subject = "Action Required: Verify returning member"
-                    title = subject
                     message = (
                         "An existing member (or someone who clicked 'skip signup I just want an account') "
                         "has setup a membership subscription. You must now decide whether to enable their site access."
                     )
                     send_email_to_admin(
-                        subject, title, message, reply_to=member_profile.user.email
+                        subject,
+                        template_vars={"title": subject, "message": message},
+                        reply_to=member_profile.user.email,
+                        user=member_profile.user,
                     )
 
                 member_profile.user.log_event(

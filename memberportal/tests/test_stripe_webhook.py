@@ -119,52 +119,44 @@ def test_an_already_active_member_is_left_alone(stripe_member, api_client, sent_
     assert Profile.objects.get(pk=profile.pk).state == "active"
 
 
-def test_returning_ineligible_member_crashes_the_webhook(
+def test_returning_ineligible_member_notifies_the_committee(
     stripe_member, api_client, sent_emails
 ):
-    """DEFECT, pinned: ``send_email_to_admin`` is called with positional arguments.
+    """A returning member paying while ineligible must not activate silently.
 
-    In the "returning member paid but is not eligible" branch::
-
-        send_email_to_admin(subject, title, message, reply_to=...)
-
-    but the signature is ``(subject, template_vars, template_name=None, ...)``.
-    So ``template_vars`` receives a plain string, and ``send_single_email``
-    immediately calls ``template_vars.get("message")`` on it.
-
-    Effect: any *returning* member (state ``inactive`` or ``accountonly``) who
-    pays an invoice without meeting the requirements triggers a 500. Stripe
-    then retries the webhook, re-sending the member's confirmation email each
-    time. New members are unaffected, because the branch is skipped for ``noob``.
+    This branch used to call send_email_to_admin() positionally, passing a
+    string where template_vars belongs, which raised AttributeError and turned
+    every such webhook into a 500 that Stripe then retried.
     """
+    from profile.models import Profile
+
     profile = stripe_member(state="inactive", rfid=None)
-
-    with pytest.raises(AttributeError, match="'str' object has no attribute 'get'"):
-        api_client.post(
-            WEBHOOK_URL, event("invoice.paid", status="paid"), format="json"
-        )
-
-    # The member email went out before the crash, so a retry duplicates it.
-    assert any("payment was successful" in e["Subject"] for e in sent_emails)
-
-
-@pytest.mark.xfail(
-    strict=True,
-    reason="DEFECT: send_email_to_admin() is called positionally in the returning-member "
-    "branch of invoice.paid, passing a string where template_vars is expected.",
-)
-def test_returning_ineligible_member_should_notify_the_committee(
-    stripe_member, api_client, sent_emails
-):
-    """The behaviour we WANT: notify the committee, return 200, do not crash."""
-    stripe_member(state="inactive", rfid=None)
 
     response = api_client.post(
         WEBHOOK_URL, event("invoice.paid", status="paid"), format="json"
     )
 
     assert response.status_code == 200
-    assert any("Verify returning member" in e["Subject"] for e in sent_emails)
+
+    refreshed = Profile.objects.get(pk=profile.pk)
+    assert refreshed.subscription_status == "active"
+    assert refreshed.state == "inactive"  # still gated on the requirements
+
+    subjects = [e["Subject"] for e in sent_emails]
+    assert any("payment was successful" in s for s in subjects)
+    assert "Action Required: Verify returning member" in subjects
+
+
+def test_a_new_member_does_not_trigger_the_committee_email(
+    stripe_member, api_client, sent_emails
+):
+    """New members already had that notification sent during registration."""
+    stripe_member(state="noob", rfid=None)
+
+    api_client.post(WEBHOOK_URL, event("invoice.paid", status="paid"), format="json")
+
+    subjects = [e["Subject"] for e in sent_emails]
+    assert "Action Required: Verify returning member" not in subjects
 
 
 # --------------------------------------------------------------------------
