@@ -352,3 +352,60 @@ def test_an_inactive_member_sees_no_access(make_member, as_member, make_door):
     body = as_member(member).get("/api/access/permissions/").json()
 
     assert body["doors"][0]["access"] is False
+
+
+# --------------------------------------------------------------------------
+# Contracts that must survive consolidating the duplicated view classes
+# --------------------------------------------------------------------------
+
+
+def test_status_reports_counts_under_the_historical_metric_labels(
+    as_admin, make_door, make_interlock, make_memberbucks_device
+):
+    """The vending-machine metric label is ``spacebucksDevice``.
+
+    It predates the memberbucks rename and does not match ``device.type``,
+    which is ``memberbucks``. Any Grafana dashboard in the wild queries the
+    old name, so the mismatch is a contract rather than a slip to tidy up
+    while collapsing the three identical loops in ``AccessSystemStatus``.
+    """
+    import api_access.metrics as metrics
+
+    make_door(serial="metrics-door")
+    make_interlock(serial="metrics-int")
+    make_memberbucks_device(serial="metrics-vend")
+
+    as_admin().get("/api/access/status/")
+
+    for label in ("door", "interlock", "spacebucksDevice"):
+        assert metrics.devices_total.labels(type=label)._value.get() == 1
+        assert metrics.devices_online_total.labels(type=label)._value.get() == 1
+        assert metrics.devices_offline_total.labels(type=label)._value.get() == 0
+        assert metrics.devices_locked_out_total.labels(type=label)._value.get() == 0
+
+
+@pytest.mark.parametrize("device_kind", ["doors", "interlocks"])
+def test_rebooting_records_which_admin_asked_for_it(
+    as_admin, make_door, make_interlock, capture_channel_sends, device_kind
+):
+    """Every remote command names the admin who sent it.
+
+    This did not hold before the command views were consolidated: of the two
+    otherwise identical reboot views, only the door one passed the request
+    through to the model, so an interlock reboot left no trace of who ordered
+    it. Both types now share one view and one code path.
+    """
+    from profile.models import UserEventLog
+
+    device = (
+        make_door(serial=f"audit-reboot-{device_kind}")
+        if device_kind == "doors"
+        else make_interlock(serial=f"audit-reboot-{device_kind}")
+    )
+    client = as_admin()
+
+    client.post(f"/api/access/{device_kind}/{device.id}/reboot/")
+
+    entry = UserEventLog.objects.get(user=client.admin_profile.user)
+    assert entry.logtype == "admin"
+    assert entry.description.startswith("Sent a reboot request to")

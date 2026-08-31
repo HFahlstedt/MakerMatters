@@ -97,6 +97,11 @@ class AccessControlledDevice(
     event_log_type = None
     event_log_relation = None
 
+    #: The ``Profile`` many-to-many that records per-member access to this
+    #: device type. Devices that do not gate access per member leave it unset
+    #: and override ``get_authorised_profiles``.
+    profile_relation = None
+
     def get_metrics_labels(self):
         return {
             "type": self.type,
@@ -230,7 +235,7 @@ class AccessControlledDevice(
                 )
 
     def reboot(self, request=None):
-        logger.info(f"Sending door reboot to channels for {self.name}")
+        logger.info(f"Sending device reboot to channels for {self.name}")
 
         if self.serial_number:
             channel_layer = get_channel_layer()
@@ -256,11 +261,14 @@ class AccessControlledDevice(
     def get_authorised_profiles(self, profiles):
         """Narrow ``profiles`` to those this device grants access to.
 
-        Every concrete device type overrides this. The base class cannot
+        A device that neither links to members nor overrides this cannot
         answer, and refuses rather than guessing: an unrecognised device must
         not quietly fall through to authorising everybody.
         """
-        raise Exception("Unknown device type")
+        if not self.profile_relation:
+            raise Exception("Unknown device type")
+
+        return profiles.filter(**{f"{self.profile_relation}__in": [self]})
 
     def get_tags(self):
         # Find profiles that are active and have an RFID tag assigned to them
@@ -313,6 +321,7 @@ class Doors(ExportModelOperationsMixin("door"), AccessControlledDevice):
     type = "door"
     event_log_type = "door"
     event_log_relation = "door"
+    profile_relation = "doors"
 
     class Meta:
         verbose_name = "Door"
@@ -320,9 +329,6 @@ class Doors(ExportModelOperationsMixin("door"), AccessControlledDevice):
         permissions = [
             ("manage_doors", "Can manage doors"),
         ]
-
-    def get_authorised_profiles(self, profiles):
-        return profiles.filter(doors__in=[self])
 
     def bump(self, request=None):
         if self.serial_number:
@@ -423,15 +429,13 @@ class Interlock(ExportModelOperationsMixin("interlock"), AccessControlledDevice)
     type = "interlock"
     event_log_type = "interlock"
     event_log_relation = "interlock"
+    profile_relation = "interlocks"
 
     cost_per_session = models.IntegerField(
         "Fixed cost per session (in cents)", default=0
     )
     cost_per_hour = models.IntegerField("Cost per hour (in cents)", default=0)
     cost_per_kwh = models.IntegerField("Cost per kWh (in cents)", default=0)
-
-    def get_authorised_profiles(self, profiles):
-        return profiles.filter(interlocks__in=[self])
 
     def on_authenticated(self):
         # An interlock that reconnected has lost whatever it was running, so a

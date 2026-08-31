@@ -1,21 +1,17 @@
 """Characterisation: what actually differs between the three device types.
 
 ``AccessControlledDevice`` is the base class for ``Doors``, ``Interlock`` and
-``MemberbucksDevice``, but it does not delegate to them — it switches on
-``self.type`` to decide what its own subclasses do. Two methods carry the whole
-switch:
+``MemberbucksDevice``. It used not to delegate to them: it switched on
+``self.type`` to decide what its own subclasses do, in two methods —
+``log_event()`` chose an EventLog type and foreign key, ``get_tags()`` chose how
+to narrow the authorised profiles. Each now sits on the class it describes.
 
-    log_event()  picks an EventLog type and which foreign key to populate
-    get_tags()   picks how to narrow the set of authorised profiles
-
-Everything else the subclasses add is genuinely their own (``Doors.bump``,
-``Interlock.session_*``).
-
-This file pins the per-type behaviour of those two methods from the outside, so
-that moving the branches down into the subclasses can be shown to change
-nothing. It deliberately covers the ``MemberbucksDevice`` cases that no other
-test reaches, because that is the type whose declared configuration and actual
-behaviour disagree — see ``test_a_vending_machine_ignores_its_default_access_flag``.
+These tests were written against the switch and pass unchanged against the
+polymorphic version, which is the point of them: they describe the behaviour
+from the outside and never name the mechanism. They deliberately cover the
+``MemberbucksDevice`` paths no other test reaches, because that is the type
+whose declared configuration and actual behaviour disagree — see
+``test_a_vending_machine_ignores_its_default_access_flag``.
 """
 
 import pytest
@@ -28,9 +24,7 @@ pytestmark = pytest.mark.django_db
 # --------------------------------------------------------------------------
 
 
-def test_a_door_authorises_only_the_members_linked_to_it(
-    make_door, make_member
-):
+def test_a_door_authorises_only_the_members_linked_to_it(make_door, make_member):
     door = make_door(serial="hier-door")
     permitted = make_member(state="active", rfid="HIER-DOOR-YES")
     make_member(state="active", rfid="HIER-DOOR-NO")
@@ -72,11 +66,12 @@ def test_a_vending_machine_ignores_its_default_access_flag(
 ):
     """DEFECT, pinned: ``all_members`` is settable but inert on this type.
 
-    ``MemberbucksDevice`` declares ``all_members = True`` in its class body,
-    which never takes effect — Django writes the field's stored value into the
-    instance during ``Model.__init__``, so the instance attribute always
-    shadows the class attribute. The behaviour it was meant to express lives in
-    the base class instead, as ``elif self.type == "memberbucks": pass``.
+    ``MemberbucksDevice`` used to declare ``all_members = True`` in its class
+    body, which never took effect — Django writes the field's stored value into
+    the instance during ``Model.__init__``, so the instance attribute always
+    shadowed the class attribute. The behaviour it was meant to express is now
+    stated by ``MemberbucksDevice.get_authorised_profiles``, which returns
+    every active member regardless of the flag.
 
     The admin API nonetheless reads and writes this field for vending machines
     (``api_admin_tools/views.py`` — ``defaultAccess``), so the admin screen
@@ -96,7 +91,7 @@ def test_a_vending_machine_ignores_its_default_access_flag(
 
 
 def test_the_base_class_refuses_to_produce_tags(make_member):
-    """The switch has no default, so an unrecognised type is a hard error."""
+    """A device with no way to answer is a hard error, not an open door."""
     from access.models import AccessControlledDevice
 
     make_member(state="active", rfid="HIER-BASE")
@@ -175,7 +170,7 @@ def test_log_event_records_the_type_and_back_reference(
 
 
 def test_the_base_class_logs_nothing_and_reports_nothing(db):
-    """Unlike get_tags, the log switch has no else — it silently does nothing."""
+    """Unlike get_tags, an undeclared device logs nothing and says so quietly."""
     from access.models import AccessControlledDevice
     from profile.models import EventLog
 

@@ -14,37 +14,37 @@ urlpatterns = [
     ),
     path(
         "api/access/doors/<int:door_id>/authorise/<int:user_id>/",
-        views.AuthoriseDoor.as_view(),
+        views.AuthoriseDevice.as_view(),
         name="AuthoriseDoor",
     ),
     path(
         "api/access/doors/<int:door_id>/revoke/<int:user_id>/",
-        views.RevokeDoor.as_view(),
+        views.RevokeDevice.as_view(),
         name="RevokeDoor",
     ),
     path(
         "api/access/interlocks/<int:interlock_id>/authorise/<int:user_id>/",
-        views.AuthoriseInterlock.as_view(),
+        views.AuthoriseDevice.as_view(),
         name="AuthoriseInterlock",
     ),
     path(
         "api/access/interlocks/<int:interlock_id>/revoke/<int:user_id>/",
-        views.RevokeInterlock.as_view(),
+        views.RevokeDevice.as_view(),
         name="RevokeInterlock",
     ),
     path(
         "api/access/interlocks/<int:interlock_id>/reboot/",
-        views.RebootInterlock.as_view(),
+        views.RebootDevice.as_view(),
         name="RebootInterlock",
     ),
     path(
         "api/access/doors/<int:door_id>/reboot/",
-        views.RebootDoor.as_view(),
+        views.RebootDevice.as_view(),
         name="RebootDoor",
     ),
     path(
         "api/access/doors/<int:door_id>/sync/",
-        views.SyncDoor.as_view(),
+        views.SyncDevice.as_view(),
         name="SyncDoor",
     ),
     path(

@@ -13,6 +13,18 @@ from rest_framework.views import APIView
 from constance import config
 
 
+def get_device(door_id=None, interlock_id=None):
+    """Resolve the device a URL refers to.
+
+    Several of these routes are registered for both doors and interlocks, so
+    which keyword argument arrives depends on which path matched.
+    """
+    if door_id is not None:
+        return Doors.objects.get(pk=door_id)
+
+    return Interlock.objects.get(pk=interlock_id)
+
+
 class AccessSystemStatus(APIView):
     """
     get: This method returns the current status of the access system.
@@ -20,99 +32,58 @@ class AccessSystemStatus(APIView):
 
     permission_classes = (HasExternalAccessControlAPIKey | permissions.IsAdminUser,)
 
-    def get(self, request):
-        statusObject = {
-            "doors": [],
-            "interlocks": [],
-            "memberbucksDevices": [],
-        }
+    #: (response key, model, Prometheus label) for each device group. The label
+    #: for vending machines is the historical "spacebucksDevice", which does
+    #: not match `device.type` and is what existing dashboards query.
+    device_groups = (
+        ("doors", Doors, "door"),
+        ("interlocks", Interlock, "interlock"),
+        ("memberbucksDevices", MemberbucksDevice, "spacebucksDevice"),
+    )
 
+    def get(self, request):
+        statusObject = {}
         error_if_offline = request.GET.get("errorIfOffline", False)
         a_device_is_offline = False
-        total_count, offline_count, online_count, locked_out_count = 0, 0, 0, 0
 
-        def reset_count():
-            nonlocal total_count, offline_count, online_count, locked_out_count
-            total_count, offline_count, online_count, locked_out_count = 0, 0, 0, 0
+        for key, model, metrics_label in self.device_groups:
+            devices = []
+            online_count, offline_count, locked_out_count = 0, 0, 0
 
-        def update_count(device_offline=False, device_locked_out=False):
-            nonlocal total_count, offline_count, online_count, locked_out_count
-            total_count += 1
-            if device_offline:
-                offline_count += 1
-            else:
-                online_count += 1
-            if device_locked_out:
-                locked_out_count += 1
+            for device in model.objects.all():
+                offline = device.get_unavailable()
 
-        def report_count(device_type: str):
-            nonlocal total_count, offline_count, online_count, locked_out_count
-            metrics.devices_total.labels(type=device_type).set(total_count)
-            metrics.devices_online_total.labels(type=device_type).set(online_count)
-            metrics.devices_offline_total.labels(type=device_type).set(offline_count)
-            metrics.devices_locked_out_total.labels(type=device_type).set(
+                devices.append(
+                    {
+                        "id": device.id,
+                        "name": device.name,
+                        "lastSeen": device.last_seen,
+                        "lockedOut": device.locked_out,
+                        "offline": offline,
+                    }
+                )
+
+                if offline:
+                    offline_count += 1
+                else:
+                    online_count += 1
+
+                if device.locked_out:
+                    locked_out_count += 1
+
+                # A device excluded from reporting still shows as offline, it
+                # just does not fail the uptime check.
+                if offline and device.report_online_status:
+                    a_device_is_offline = True
+
+            statusObject[key] = devices
+
+            metrics.devices_total.labels(type=metrics_label).set(len(devices))
+            metrics.devices_online_total.labels(type=metrics_label).set(online_count)
+            metrics.devices_offline_total.labels(type=metrics_label).set(offline_count)
+            metrics.devices_locked_out_total.labels(type=metrics_label).set(
                 locked_out_count
             )
-
-        for door in Doors.objects.all():
-            offline = door.get_unavailable()
-            update_count(offline, door.locked_out)
-
-            statusObject["doors"].append(
-                {
-                    "id": door.id,
-                    "name": door.name,
-                    "lastSeen": door.last_seen,
-                    "lockedOut": door.locked_out,
-                    "offline": offline,
-                }
-            )
-            if offline and door.report_online_status:
-                a_device_is_offline = True
-
-        # report door metrics
-        report_count("door")
-        reset_count()
-
-        for interlock in Interlock.objects.all():
-            offline = interlock.get_unavailable()
-            update_count(offline, interlock.locked_out)
-
-            statusObject["interlocks"].append(
-                {
-                    "id": interlock.id,
-                    "name": interlock.name,
-                    "lastSeen": interlock.last_seen,
-                    "lockedOut": interlock.locked_out,
-                    "offline": offline,
-                }
-            )
-            if offline and interlock.report_online_status:
-                a_device_is_offline = True
-
-        # report interlock metrics
-        report_count("interlock")
-        reset_count()
-
-        for memberbucksDevice in MemberbucksDevice.objects.all():
-            offline = memberbucksDevice.get_unavailable()
-            update_count(offline, memberbucksDevice.locked_out)
-
-            statusObject["memberbucksDevices"].append(
-                {
-                    "id": memberbucksDevice.id,
-                    "name": memberbucksDevice.name,
-                    "lastSeen": memberbucksDevice.last_seen,
-                    "lockedOut": memberbucksDevice.locked_out,
-                    "offline": offline,
-                }
-            )
-            if offline and memberbucksDevice.report_online_status:
-                a_device_is_offline = True
-
-        # report spacebucksDevices metrics
-        report_count("spacebucksDevice")
-        reset_count()
 
         if error_if_offline and a_device_is_offline:
             return Response(statusObject, status=status.HTTP_503_SERVICE_UNAVAILABLE)
@@ -129,189 +100,130 @@ class UserAccessPermissions(APIView):
         return Response(request.user.profile.get_access_permissions())
 
 
-class AuthoriseDoor(APIView):
-    """
-    post: This method authorises a member to access a door.
+class DeviceAccessView(APIView):
+    """Grant or revoke one member's access to one device.
+
+    The device itself names the Profile relation that records per-member
+    access, so this works for any device type that has one.
     """
 
     permission_classes = (permissions.IsAdminUser,)
 
-    def put(self, request, door_id, user_id):
-        member = User.objects.get(pk=user_id)
-        door = Doors.objects.get(pk=door_id)
+    #: "add" or "remove" on that relation.
+    action = None
 
-        member.profile.doors.add(door)
+    def put(self, request, user_id, door_id=None, interlock_id=None):
+        member = User.objects.get(pk=user_id)
+        device = get_device(door_id=door_id, interlock_id=interlock_id)
+
+        relation = getattr(member.profile, device.profile_relation)
+        getattr(relation, self.action)(device)
         member.profile.save()
-        door.sync()
+        device.sync()
 
         return Response()
 
 
-class AuthoriseInterlock(APIView):
+class AuthoriseDevice(DeviceAccessView):
     """
-    put: This method authorises a member to access an interlock.
-    """
-
-    permission_classes = (permissions.IsAdminUser,)
-
-    def put(self, request, interlock_id, user_id):
-        member = User.objects.get(pk=user_id)
-        interlock = Interlock.objects.get(pk=interlock_id)
-
-        member.profile.interlocks.add(interlock)
-        member.profile.save()
-        interlock.sync()
-
-        return Response()
-
-
-class RevokeDoor(APIView):
-    """
-    put: This method revokes a member's access to a door.
+    put: This method authorises a member to access a door or interlock.
     """
 
-    permission_classes = (permissions.IsAdminUser,)
-
-    def put(self, request, door_id, user_id):
-        member = User.objects.get(pk=user_id)
-        door = Doors.objects.get(pk=door_id)
-
-        member.profile.doors.remove(door)
-        member.profile.save()
-        door.sync()
-
-        return Response()
+    action = "add"
 
 
-class RevokeInterlock(APIView):
+class RevokeDevice(DeviceAccessView):
     """
-    post: This method revokes a member's access to an interlock.
+    put: This method revokes a member's access to a door or interlock.
+    """
+
+    action = "remove"
+
+
+class DeviceCommandView(APIView):
+    """Send one remote command to a door or interlock.
+
+    Subclasses name the model method that sends the command and the one that
+    records it in the device's event log. The command is passed the request so
+    it can also record which admin asked for it.
     """
 
     permission_classes = (permissions.IsAdminUser,)
 
-    def put(self, request, interlock_id, user_id):
-        member = User.objects.get(pk=user_id)
-        interlock = Interlock.objects.get(pk=interlock_id)
+    #: Name of the model method that sends the command.
+    command = None
+    #: Name of the model method that records it against the device.
+    audit = None
 
-        member.profile.interlocks.remove(interlock)
-        member.profile.save()
-        interlock.sync()
+    def post(self, request, door_id=None, interlock_id=None):
+        device = get_device(door_id=door_id, interlock_id=interlock_id)
 
-        return Response()
+        getattr(device, self.audit)()
+        result = getattr(device, self.command)(request=request)
 
-
-class RebootInterlock(APIView):
-    """
-    post: This method will reboot the specified interlock.
-    """
-
-    permission_classes = (permissions.IsAdminUser,)
-
-    def post(self, request, interlock_id):
-        interlock = Interlock.objects.get(pk=interlock_id)
-        interlock.log_force_rebooted()
-
-        return Response({"success": interlock.reboot()})
+        return Response({"success": result})
 
 
-class SyncDoor(APIView):
-    """
-    post: This method will force sync the specified door.
+class ExternalDeviceCommandView(DeviceCommandView):
+    """A command that MAY also be invoked externally with an API key.
+
+    The permission classes admit an API key, so the config flag is checked
+    here as well: holding a key is not enough unless the space has opted in to
+    third-party control.
     """
 
-    permission_classes = (permissions.IsAdminUser,)
+    permission_classes = (HasExternalAccessControlAPIKey | permissions.IsAdminUser,)
 
-    def post(self, request, door_id):
-        door = Doors.objects.get(pk=door_id)
-        door.log_force_sync()
+    def post(self, request, **kwargs):
+        if not (config.ENABLE_DOOR_BUMP_API or request.user.is_authenticated):
+            return Response(
+                {"success": False, "error": "This API is disabled in the config."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
 
-        return Response({"success": door.sync(request=request)})
+        return super().post(request, **kwargs)
 
 
-class RebootDoor(APIView):
+class SyncDevice(DeviceCommandView):
     """
-    post: This method will reboot the specified door.
+    post: This method will force sync the specified device.
     """
 
-    permission_classes = (permissions.IsAdminUser,)
-
-    def post(self, request, door_id):
-        door = Doors.objects.get(pk=door_id)
-        door.log_force_rebooted()
-
-        return Response({"success": door.reboot(request=request)})
+    command = "sync"
+    audit = "log_force_sync"
 
 
-class BumpDoor(APIView):
+class RebootDevice(DeviceCommandView):
+    """
+    post: This method will reboot the specified device.
+    """
+
+    command = "reboot"
+    audit = "log_force_rebooted"
+
+
+class BumpDoor(ExternalDeviceCommandView):
     """
     post: This method will 'bump' the specified door. Note this MAY be called externally with an API key.
     """
 
-    permission_classes = (HasExternalAccessControlAPIKey | permissions.IsAdminUser,)
-
-    def post(self, request, door_id):
-        # at this point the credentials been authorised by the permissions classes above
-        # BUT we still need to check if the API is enabled or it's a user making the request
-        if config.ENABLE_DOOR_BUMP_API or request.user.is_authenticated:
-            door = Doors.objects.get(pk=door_id)
-            bumped = door.bump(request)
-            door.log_force_bump()
-            return Response({"success": bumped})
-        else:
-            return Response(
-                {"success": False, "error": "This API is disabled in the config."},
-                status=status.HTTP_403_FORBIDDEN,
-            )
+    command = "bump"
+    audit = "log_force_bump"
 
 
-class LockDevice(APIView):
+class LockDevice(ExternalDeviceCommandView):
     """
     post: This method will 'lock' the specified device. Note this MAY be called externally with an API key.
     """
 
-    permission_classes = (HasExternalAccessControlAPIKey | permissions.IsAdminUser,)
-
-    def post(self, request, door_id=None, interlock_id=None):
-        # at this point the credentials been authorised by the permissions classes above
-        # BUT we still need to check if the API is enabled or it's a user making the request
-        if config.ENABLE_DOOR_BUMP_API or request.user.is_authenticated:
-            device = (
-                Doors.objects.get(pk=door_id)
-                if door_id
-                else Interlock.objects.get(pk=interlock_id)
-            )
-            locked = device.lock(request)
-            device.log_force_lock()
-            return Response({"success": locked})
-        else:
-            return Response(
-                {"success": False, "error": "This API is disabled in the config."},
-                status=status.HTTP_403_FORBIDDEN,
-            )
+    command = "lock"
+    audit = "log_force_lock"
 
 
-class UnlockDevice(APIView):
+class UnlockDevice(ExternalDeviceCommandView):
     """
     post: This method will 'unlock' the specified device. Note this MAY be called externally with an API key.
     """
 
-    permission_classes = (HasExternalAccessControlAPIKey | permissions.IsAdminUser,)
-
-    def post(self, request, door_id=None, interlock_id=None):
-        # at this point the credentials been authorised by the permissions classes above
-        # BUT we still need to check if the API is enabled or it's a user making the request
-        if config.ENABLE_DOOR_BUMP_API or request.user.is_authenticated:
-            device = (
-                Doors.objects.get(pk=door_id)
-                if door_id
-                else Interlock.objects.get(pk=interlock_id)
-            )
-            unlocked = device.unlock(request)
-            device.log_force_unlock()
-            return Response({"success": unlocked})
-        else:
-            return Response(
-                {"success": False, "error": "This API is disabled in the config."},
-                status=status.HTTP_403_FORBIDDEN,
-            )
+    command = "unlock"
+    audit = "log_force_unlock"
