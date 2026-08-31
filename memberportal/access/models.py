@@ -86,7 +86,16 @@ class AccessControlledDevice(
         "Hidden from members in their access permissions screen", default=False
     )
 
+    #: Identifies the concrete device type. This is a Prometheus label value
+    #: as well as an identifier, so the strings themselves are a contract.
     type = "unknown"
+
+    #: How this device appears in the shared event log: the ``EventLog.logtype``
+    #: to record, and the keyword argument on ``profile.models.log_event`` that
+    #: carries the foreign key back to this row. Each concrete type declares
+    #: its own; the base class has none and therefore logs nothing.
+    event_log_type = None
+    event_log_relation = None
 
     def get_metrics_labels(self):
         return {
@@ -114,25 +123,16 @@ class AccessControlledDevice(
         metrics.device_access_successes_total.labels(**self.get_metrics_labels()).inc()
 
     def log_event(self, description=None, data=None):
-        if self.type == "door":
-            log_event(description=description, event_type="door", data=data, door=self)
-            return True
-        elif self.type == "interlock":
-            log_event(
-                description=description,
-                event_type="interlock",
-                data=data,
-                interlock=self,
-            )
-            return True
-        elif self.type == "memberbucks":
-            log_event(
-                description=description,
-                event_type="memberbucksdevice",
-                data=data,
-                memberbucks_device=self,
-            )
-            return True
+        if not self.event_log_type:
+            return None
+
+        log_event(
+            description=description,
+            event_type=self.event_log_type,
+            data=data,
+            **{self.event_log_relation: self},
+        )
+        return True
 
     def log_connected(self):
         self.log_event(
@@ -244,6 +244,24 @@ class AccessControlledDevice(
                     "admin",
                 )
 
+    def on_authenticated(self):
+        """Hook for state a device type must reconcile when it (re)connects.
+
+        A device that has just authenticated may be a fresh boot after a power
+        cut, so anything the database still believes is running on it is
+        suspect. Most types keep no such state and do nothing.
+        """
+        return None
+
+    def get_authorised_profiles(self, profiles):
+        """Narrow ``profiles`` to those this device grants access to.
+
+        Every concrete device type overrides this. The base class cannot
+        answer, and refuses rather than guessing: an unrecognised device must
+        not quietly fall through to authorising everybody.
+        """
+        raise Exception("Unknown device type")
+
     def get_tags(self):
         # Find profiles that are active and have an RFID tag assigned to them
         ProfileQueryset = Profile.objects.filter(state="active").exclude(
@@ -251,16 +269,7 @@ class AccessControlledDevice(
         )
         authorised_tags = list()
 
-        # Get the device object
-        if self.type == "door":
-            ProfileQueryset = ProfileQueryset.filter(doors__in=[self])
-        elif self.type == "interlock":
-            ProfileQueryset = ProfileQueryset.filter(interlocks__in=[self])
-        elif self.type == "memberbucks":
-            pass
-            # all profiles are authorised for memberbucks devices
-        else:
-            raise Exception("Unknown device type")
+        ProfileQueryset = self.get_authorised_profiles(ProfileQueryset)
 
         for profile in ProfileQueryset.all():
             # If the site sign in feature is disabled, or the device is exempt
@@ -280,16 +289,30 @@ class AccessControlledDevice(
 class MemberbucksDevice(
     ExportModelOperationsMixin("memberbucks-device"), AccessControlledDevice
 ):
-    all_members = True
     type = "memberbucks"
+    event_log_type = "memberbucksdevice"
+    event_log_relation = "memberbucks_device"
 
     class Meta:
         verbose_name = "Memberbucks Device"
         verbose_name_plural = "Memberbucks Devices"
 
+    def get_authorised_profiles(self, profiles):
+        # Every active member may use a vending machine: their balance, not a
+        # permission link, decides whether a purchase succeeds.
+        #
+        # This deliberately ignores `all_members`, matching what the type
+        # switch did before. The admin API still exposes that field for
+        # vending machines as `defaultAccess`, so the toggle on the admin
+        # screen has no effect in either position. Pinned by
+        # test_a_vending_machine_ignores_its_default_access_flag.
+        return profiles
+
 
 class Doors(ExportModelOperationsMixin("door"), AccessControlledDevice):
     type = "door"
+    event_log_type = "door"
+    event_log_relation = "door"
 
     class Meta:
         verbose_name = "Door"
@@ -297,6 +320,9 @@ class Doors(ExportModelOperationsMixin("door"), AccessControlledDevice):
         permissions = [
             ("manage_doors", "Can manage doors"),
         ]
+
+    def get_authorised_profiles(self, profiles):
+        return profiles.filter(doors__in=[self])
 
     def bump(self, request=None):
         if self.serial_number:
@@ -395,12 +421,23 @@ class Doors(ExportModelOperationsMixin("door"), AccessControlledDevice):
 
 class Interlock(ExportModelOperationsMixin("interlock"), AccessControlledDevice):
     type = "interlock"
+    event_log_type = "interlock"
+    event_log_relation = "interlock"
 
     cost_per_session = models.IntegerField(
         "Fixed cost per session (in cents)", default=0
     )
     cost_per_hour = models.IntegerField("Cost per hour (in cents)", default=0)
     cost_per_kwh = models.IntegerField("Cost per kWh (in cents)", default=0)
+
+    def get_authorised_profiles(self, profiles):
+        return profiles.filter(interlocks__in=[self])
+
+    def on_authenticated(self):
+        # An interlock that reconnected has lost whatever it was running, so a
+        # session still open in the database is stale and would otherwise
+        # accrue time forever.
+        self.session_end_all("new_connection")
 
     def get_active_sessions(self):
         return InterlockLog.objects.filter(interlock=self, date_ended=None).all()

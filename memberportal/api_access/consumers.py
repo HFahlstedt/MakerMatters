@@ -121,8 +121,7 @@ class AccessDeviceConsumer(JsonWebsocketConsumer):
                     self.sync_users({})  # sync the cards down
                     self.update_device_locked_out()
 
-                    if self.device.type == "interlock":
-                        self.device.session_end_all("new_connection")
+                    self.device.on_authenticated()
                 else:
                     logger.debug(
                         "Authorisation failed from " + self.device.serial_number

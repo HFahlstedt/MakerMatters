@@ -52,6 +52,7 @@ opens the log file at import time.
 | `test_admin_members.py` | Member list, activation, promotion, profile editing, access review, logs and billing info. |
 | `test_admin_tiers_and_settings.py` | Tier and plan CRUD against Stripe, plus the Constance settings API. |
 | `test_access_admin_endpoints.py` | Grant/revoke, the remote device commands, and the externally callable API-key subset. |
+| `test_device_model_hierarchy.py` | What genuinely differs between the three device types — the per-type behaviour that used to live in the base class as a switch on `self.type`. |
 
 ## Conventions
 
