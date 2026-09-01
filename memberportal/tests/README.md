@@ -22,6 +22,14 @@ decision rather than a patch:
 - `AccessControlledDevice.all_members` is a column on every device type, but
   vending machines have no per-member access list for it to gate. The admin
   API no longer exposes it for that type; the column remains.
+- `Kiosks` guards read and delete with `not authenticated and not staff`, which
+  blocks only anonymous callers, so any logged-in member can list every kiosk
+  id or delete one. See `test_auth_and_session.py`.
+- Several smaller ones pinned in `test_auth_and_session.py`: registration reads
+  `email` before checking it (a 500, not a 400); the password-reset endpoint
+  reveals whether an address is registered, and 500s on an unknown token in the
+  branch that changes the password; kiosk login ignores member state; repeated
+  failed logins by an unverified member mint unbounded verification tokens.
 
 ## Running
 
@@ -56,6 +64,7 @@ opens the log file at import time.
 | `test_admin_tiers_and_settings.py` | Tier and plan CRUD against Stripe, plus the Constance settings API. |
 | `test_access_admin_endpoints.py` | Grant/revoke, the remote device commands, and the externally callable API-key subset. |
 | `test_device_model_hierarchy.py` | What genuinely differs between the three device types — the per-type behaviour that used to live in the base class as a switch on `self.type`. |
+| `test_auth_and_session.py` | Login (password, kiosk RFID, Discourse SSO), registration, email verification, password reset, the member-facing profile, and the site sessions that `get_tags()` consults. |
 
 ## Conventions
 
