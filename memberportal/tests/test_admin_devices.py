@@ -1,16 +1,16 @@
 """Characterisation: the admin device CRUD endpoints.
 
-``api_admin_tools`` has three near-identical classes — ``Doors``,
-``Interlocks`` and ``MemberbucksDevices`` — that share their read/update/delete
-shape and differ only in the statistics they aggregate. They are the most
-obvious candidate for consolidation in the planned refactor.
+``api_admin_tools`` had three near-identical classes — ``Doors``,
+``Interlocks`` and ``MemberbucksDevices`` — sharing their read/update/delete
+shape and differing only in the statistics they aggregate. They now share one
+base, and these tests are what made that safe.
 
-Before that can happen safely, the three response shapes have to be written
-down, because **they have already drifted apart**. Doors expose
-``serialNumber`` and the Discord/Slack toggles but no ``authorised`` flag;
-interlocks and vending devices expose ``authorised`` but neither
-``serialNumber`` nor the toggles. Any consolidation will be tempted to unify
-them, which would silently change the API the admin frontend consumes.
+The three response shapes had **already drifted apart**, so the differences are
+written down here deliberately. Doors expose ``serialNumber`` and the
+Discord/Slack toggles but no ``authorised`` flag; interlocks and vending
+devices expose ``authorised`` but neither ``serialNumber`` nor the toggles.
+Consolidation was tempted to unify them, which would have silently changed the
+API the admin frontend consumes.
 
 Every field is asserted by exact dict comparison rather than spot-checks, so a
 serializer rewrite cannot drop or rename one unnoticed.
@@ -334,17 +334,12 @@ def test_disabling_default_access_revokes_it_from_every_member(
 
 
 def test_toggling_maintenance_lockout_notifies_the_device(
-    as_admin, make_door, monkeypatch
+    as_admin, make_door, capture_channel_sends
 ):
     """A lockout change must reach the hardware, not just the database."""
     from access.models import Doors
 
     door = make_door(serial="door-lockout")
-    sent = []
-    monkeypatch.setattr(
-        "api_admin_tools.views.async_to_sync",
-        lambda fn: (lambda *args, **kwargs: sent.append((args, kwargs))),
-    )
 
     as_admin().put(
         f"/api/admin/doors/{door.id}/",
@@ -353,9 +348,67 @@ def test_toggling_maintenance_lockout_notifies_the_device(
     )
 
     assert Doors.objects.get(pk=door.id).locked_out is True
-    events = [args[1]["type"] for args, _ in sent]
-    assert "update_device_locked_out" in events
-    assert "update_device_object" in events
+    assert "update_device_locked_out" in capture_channel_sends
+    assert "update_device_object" in capture_channel_sends
+
+
+def test_changing_only_the_signin_exemption_reaches_the_device(
+    as_admin, make_door, capture_channel_sends
+):
+    """The exemption decides whose tags are sent, so it has to trigger a sync.
+
+    The guard used to compare the field against the value that had already
+    been written to it — ``door.exempt_signin = data.get("exemptFromSignin")``
+    a few lines above ``if ... door.exempt_signin != data.get(...)`` — so it
+    could never be true. The exemption was saved and never synced, and the
+    device kept enforcing the old rule until something else triggered one.
+    """
+    from access.models import Doors
+
+    door = make_door(serial="door-signin", exempt_signin=False)
+
+    as_admin().put(
+        f"/api/admin/doors/{door.id}/",
+        door_payload(serialNumber="door-signin", exemptFromSignin=True),
+        format="json",
+    )
+
+    assert Doors.objects.get(pk=door.id).exempt_signin is True
+    assert "sync_users" in capture_channel_sends
+    assert "update_device_object" in capture_channel_sends
+
+
+def test_updating_a_memberbucks_device_notifies_it_of_a_lockout(
+    as_admin, make_memberbucks_device, capture_channel_sends
+):
+    """A vending lockout reaches the machine, as it always did for the others.
+
+    Doors and interlocks pushed ``update_device_locked_out`` and
+    ``update_device_object`` when the lockout changed. The vending endpoint was
+    otherwise the same code, but that half was never copied across, so the
+    lockout was stored and the machine never told.
+    """
+    from access.models import MemberbucksDevice
+
+    device = make_memberbucks_device(serial="vend-lockout")
+
+    as_admin().put(
+        f"/api/admin/memberbucks-devices/{device.id}/",
+        {
+            "name": "Renamed Vending",
+            "description": "Updated",
+            "ipAddress": "10.0.0.5",
+            "maintenanceLockout": True,
+            "playThemeOnSwipe": False,
+            "exemptFromSignin": False,
+            "hiddenToMembers": False,
+        },
+        format="json",
+    )
+
+    assert MemberbucksDevice.objects.get(pk=device.id).locked_out is True
+    assert "update_device_locked_out" in capture_channel_sends
+    assert "update_device_object" in capture_channel_sends
 
 
 def test_deleting_a_device_removes_it(as_admin, make_door, make_interlock):

@@ -36,17 +36,6 @@ def external_key_client(api_client):
     return _auth
 
 
-@pytest.fixture
-def capture_channel_sends(monkeypatch):
-    """Record what would be pushed to devices, without a channel layer."""
-    sent = []
-    monkeypatch.setattr(
-        "access.models.async_to_sync",
-        lambda fn: (lambda *args, **kwargs: sent.append(args[1]["type"])),
-    )
-    return sent
-
-
 # --------------------------------------------------------------------------
 # System status
 # --------------------------------------------------------------------------

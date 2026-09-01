@@ -372,3 +372,19 @@ def with_api_key(api_client):
         return api_client
 
     return _auth
+
+
+@pytest.fixture
+def capture_channel_sends(monkeypatch):
+    """Record what would be pushed to devices, without a channel layer.
+
+    Every device command routes through ``AccessControlledDevice.send_command``,
+    so patching ``access.models.async_to_sync`` catches all of them — the
+    remote commands and the pushes an admin update triggers alike.
+    """
+    sent = []
+    monkeypatch.setattr(
+        "access.models.async_to_sync",
+        lambda fn: (lambda *args, **kwargs: sent.append(args[1]["type"])),
+    )
+    return sent

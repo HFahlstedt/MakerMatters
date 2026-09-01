@@ -1,8 +1,6 @@
 import json
 
 import stripe
-from asgiref.sync import async_to_sync
-from channels.layers import get_channel_layer
 from constance import config
 from constance.models import Constance as ConstanceSetting
 from constance.codecs import dumps as constance_dumps, loads as constance_loads
@@ -156,337 +154,244 @@ class MakeMember(APIView):
             )
 
 
-class Doors(APIView):
+class DeviceAdminView(APIView):
+    """List, update and delete one device type.
+
+    The three device types share their entire read/update/delete shape and
+    differ in only two places: which fields they expose beyond the common set,
+    and which usage statistics they aggregate. Subclasses supply those. The
+    side effects of an update — granting or revoking default access, pushing a
+    maintenance lockout, re-syncing the device — are the same for all of them.
+    """
+
+    permission_classes = (permissions.IsAdminUser,)
+
+    #: The concrete device model.
+    model = None
+
+    #: Read-only response fields, as {API key: model attribute}.
+    readonly_fields = {
+        "id": "id",
+        "lastSeen": "last_seen",
+    }
+
+    #: Fields the admin screen may change, same mapping. The read and write
+    #: paths both work from this, so a field cannot become readable but not
+    #: writable — which is how the three shapes drifted apart to begin with.
+    editable_fields = {
+        "name": "name",
+        "description": "description",
+        "ipAddress": "ip_address",
+        "maintenanceLockout": "locked_out",
+        "playThemeOnSwipe": "play_theme",
+        "exemptFromSignin": "exempt_signin",
+        "hiddenToMembers": "hidden",
+    }
+
+    def get_statistics(self, device):
+        """The usage figures this device type reports. Differs per type."""
+        raise NotImplementedError
+
+    def get_device(self, device):
+        body = {
+            key: getattr(device, attr)
+            for mapping in (self.readonly_fields, self.editable_fields)
+            for key, attr in mapping.items()
+        }
+        body["offline"] = device.get_unavailable()
+        body.update(self.get_statistics(device))
+
+        return body
+
+    def get(self, request):
+        return Response(map(self.get_device, self.model.objects.all()))
+
+    def set_default_access(self, device, granted):
+        """Grant or revoke this device for every member, one at a time.
+
+        A single m2m call would do the same thing far more cheaply, but the
+        per-member ``profile.save()`` is load-bearing for anything listening
+        for profile writes, so the loop stays until that is checked.
+        """
+        for member in User.objects.all():
+            relation = getattr(member.profile, device.profile_relation)
+
+            if granted:
+                relation.add(device)
+            else:
+                relation.remove(device)
+
+            member.profile.save()
+
+    def put(self, request, device_id):
+        device = self.model.objects.get(pk=device_id)
+        data = request.data
+
+        # All three comparisons must happen before the assignment loop below
+        # overwrites the values they are reading.
+        default_access_changed = "defaultAccess" in self.editable_fields and (
+            device.all_members != data.get("defaultAccess")
+        )
+        locked_out_changed = device.locked_out != data.get("maintenanceLockout")
+        signin_exemption_changed = device.exempt_signin != data.get("exemptFromSignin")
+
+        for key, attr in self.editable_fields.items():
+            setattr(device, attr, data.get(key))
+
+        device.save()
+
+        if default_access_changed:
+            self.set_default_access(device, granted=data.get("defaultAccess"))
+
+        if locked_out_changed:
+            device.send_command("update_device_locked_out")
+
+        if default_access_changed or locked_out_changed or signin_exemption_changed:
+            # Push the new tag list, then the new device settings.
+            device.sync()
+            device.send_command("update_device_object")
+
+        return Response()
+
+    def delete(self, request, device_id):
+        self.model.objects.get(pk=device_id).delete()
+
+        return Response()
+
+
+class Doors(DeviceAdminView):
     """
     get: returns a list of doors.
     put: updates a specific door.
     delete: deletes a specific door.
     """
 
-    permission_classes = (permissions.IsAdminUser,)
+    model = models.Doors
 
-    def get(self, request):
-        doors = models.Doors.objects.all()
+    # Doors are the only type exposing a serial number and the messaging
+    # toggles, and the only one that does not report `authorised`.
+    editable_fields = {
+        **DeviceAdminView.editable_fields,
+        "serialNumber": "serial_number",
+        "defaultAccess": "all_members",
+        "postDiscordOnSwipe": "post_to_discord",
+        "postSlackOnSwipe": "post_to_slack",
+    }
 
-        def get_door(door):
-            logs = models.DoorLog.objects.filter(door_id=door.id)
+    def get_statistics(self, door):
+        logs = models.DoorLog.objects.filter(door_id=door.id)
 
-            # Query to get the statistics
-            stats = (
-                logs.select_related("user__profile")
-                .values("door_id")
-                .annotate(
-                    screen_name=F("user__profile__screen_name"),
-                    full_name=Concat(
-                        F("user__profile__first_name"),
-                        Value(" "),
-                        F("user__profile__last_name"),
-                        output_field=CharField(),
-                    ),
-                    total_swipes=Count("door_id"),
-                    last_swipe=Max("date"),
-                )
-                .order_by("-total_swipes")
+        stats = (
+            logs.select_related("user__profile")
+            .values("door_id")
+            .annotate(
+                screen_name=F("user__profile__screen_name"),
+                full_name=Concat(
+                    F("user__profile__first_name"),
+                    Value(" "),
+                    F("user__profile__last_name"),
+                    output_field=CharField(),
+                ),
+                total_swipes=Count("door_id"),
+                last_swipe=Max("date"),
             )
+            .order_by("-total_swipes")
+        )
 
-            return {
-                "id": door.id,
-                "name": door.name,
-                "description": door.description,
-                "ipAddress": door.ip_address,
-                "serialNumber": door.serial_number,
-                "lastSeen": door.last_seen,
-                "offline": door.get_unavailable(),
-                "defaultAccess": door.all_members,
-                "maintenanceLockout": door.locked_out,
-                "playThemeOnSwipe": door.play_theme,
-                "postDiscordOnSwipe": door.post_to_discord,
-                "postSlackOnSwipe": door.post_to_slack,
-                "exemptFromSignin": door.exempt_signin,
-                "hiddenToMembers": door.hidden,
-                "totalSwipes": logs.count(),
-                "userStats": stats,
-            }
-
-        return Response(map(get_door, doors))
-
-    def put(self, request, door_id):
-        door = models.Doors.objects.get(pk=door_id)
-        data = request.data
-        all_members_added = False
-        all_members_removed = False
-        locked_out_changed = False
-
-        if door.all_members != data.get("defaultAccess"):
-            if data.get("defaultAccess"):
-                all_members_added = True
-            else:
-                all_members_removed = True
-
-        if door.locked_out != data.get("maintenanceLockout"):
-            locked_out_changed = True
-
-        door.name = data.get("name")
-        door.description = data.get("description")
-        door.ip_address = data.get("ipAddress")
-        door.serial_number = data.get("serialNumber")
-        door.all_members = data.get("defaultAccess")
-        door.locked_out = data.get("maintenanceLockout")
-        door.play_theme = data.get("playThemeOnSwipe")
-        door.post_to_discord = data.get("postDiscordOnSwipe")
-        door.post_to_slack = data.get("postSlackOnSwipe")
-        door.exempt_signin = data.get("exemptFromSignin")
-        door.hidden = data.get("hiddenToMembers")
-        door.save()
-
-        if locked_out_changed:
-            channel_layer = get_channel_layer()
-            async_to_sync(channel_layer.group_send)(
-                door.serial_number, {"type": "update_device_locked_out"}
-            )
-
-        if all_members_added or all_members_removed:
-            members = User.objects.all()
-
-            for member in members:
-                if all_members_added:
-                    member.profile.doors.add(door)
-                else:
-                    member.profile.doors.remove(door)
-
-                member.profile.save()
-
-        if (
-            all_members_added
-            or all_members_removed
-            or locked_out_changed
-            or door.exempt_signin != data.get("exemptFromSignin")
-        ):
-            # once we're done, sync changes to the device
-            door.sync()
-
-            # update the door object on the websocket consumer
-            channel_layer = get_channel_layer()
-            async_to_sync(channel_layer.group_send)(
-                door.serial_number, {"type": "update_device_object"}
-            )
-
-        return Response()
-
-    def delete(self, request, door_id):
-        door = models.Doors.objects.get(pk=door_id)
-        door.delete()
-
-        return Response()
+        return {"totalSwipes": logs.count(), "userStats": list(stats)}
 
 
-class Interlocks(APIView):
+class Interlocks(DeviceAdminView):
     """
     get: returns a list of interlocks.
     put: update a specific interlock.
     delete: delete a specific interlock.
     """
 
-    permission_classes = (permissions.IsAdminUser,)
+    model = models.Interlock
 
-    def get(self, request):
-        interlocks = models.Interlock.objects.all()
+    readonly_fields = {
+        **DeviceAdminView.readonly_fields,
+        "authorised": "authorised",
+    }
+    editable_fields = {
+        **DeviceAdminView.editable_fields,
+        "defaultAccess": "all_members",
+    }
 
-        def get_interlock(interlock):
-            # Calculate total on time
-            logs = InterlockLog.objects.filter(interlock_id=interlock.id)
-            total_time = logs.aggregate(total_time=Sum("total_time")).get("total_time")
-            total_time_seconds = total_time.total_seconds() if total_time else 0
+    def get_statistics(self, interlock):
+        logs = InterlockLog.objects.filter(interlock_id=interlock.id)
+        total_time = logs.aggregate(total_time=Sum("total_time")).get("total_time")
 
-            # Retrieve stats
-            stats = (
-                logs.select_related("user_started__profile")
-                .values("interlock_id")
-                .annotate(
-                    screen_name=F("user_started__profile__screen_name"),
-                    full_name=Concat(
-                        F("user_started__profile__first_name"),
-                        Value(" "),
-                        F("user_started__profile__last_name"),
-                        output_field=CharField(),
-                    ),
-                    total_swipes=Count("total_time"),
-                    total_seconds=Sum("total_time"),
-                )
-                .order_by("-total_seconds", "-total_swipes")
+        stats = (
+            logs.select_related("user_started__profile")
+            .values("interlock_id")
+            .annotate(
+                screen_name=F("user_started__profile__screen_name"),
+                full_name=Concat(
+                    F("user_started__profile__first_name"),
+                    Value(" "),
+                    F("user_started__profile__last_name"),
+                    output_field=CharField(),
+                ),
+                total_swipes=Count("total_time"),
+                total_seconds=Sum("total_time"),
             )
+            .order_by("-total_seconds", "-total_swipes")
+        )
 
-            return {
-                "id": interlock.id,
-                "authorised": interlock.authorised,
-                "name": interlock.name,
-                "description": interlock.description,
-                "ipAddress": interlock.ip_address,
-                "lastSeen": interlock.last_seen,
-                "offline": interlock.get_unavailable(),
-                "defaultAccess": interlock.all_members,
-                "maintenanceLockout": interlock.locked_out,
-                "playThemeOnSwipe": interlock.play_theme,
-                "exemptFromSignin": interlock.exempt_signin,
-                "hiddenToMembers": interlock.hidden,
-                "totalTimeSeconds": total_time_seconds,
-                "userStats": list(stats),
-            }
-
-        return Response(map(get_interlock, interlocks))
-
-    def put(self, request, interlock_id):
-        interlock = models.Interlock.objects.get(pk=interlock_id)
-        data = request.data
-        all_members_added = False
-        all_members_removed = False
-        locked_out_changed = False
-
-        if interlock.all_members != data.get("defaultAccess"):
-            if data.get("defaultAccess"):
-                all_members_added = True
-            else:
-                all_members_removed = True
-
-        if interlock.locked_out != data.get("maintenanceLockout"):
-            locked_out_changed = True
-
-        interlock.name = data.get("name")
-        interlock.description = data.get("description")
-        interlock.ip_address = data.get("ipAddress")
-        interlock.all_members = data.get("defaultAccess")
-        interlock.locked_out = data.get("maintenanceLockout")
-        interlock.play_theme = data.get("playThemeOnSwipe")
-        interlock.exempt_signin = data.get("exemptFromSignin")
-        interlock.hidden = data.get("hiddenToMembers")
-        interlock.save()
-
-        if locked_out_changed:
-            channel_layer = get_channel_layer()
-            async_to_sync(channel_layer.group_send)(
-                interlock.serial_number, {"type": "update_device_locked_out"}
-            )
-
-        if all_members_added or all_members_removed:
-            members = User.objects.all()
-
-            for member in members:
-                if all_members_added:
-                    member.profile.interlocks.add(interlock)
-                else:
-                    member.profile.interlocks.remove(interlock)
-
-                member.profile.save()
-
-        if (
-            all_members_added
-            or all_members_removed
-            or locked_out_changed
-            or interlock.exempt_signin != data.get("exemptFromSignin")
-        ):
-            # once we're done, sync changes to the device
-            interlock.sync()
-
-            # update the door object on the websocket consumer
-            channel_layer = get_channel_layer()
-            async_to_sync(channel_layer.group_send)(
-                interlock.serial_number, {"type": "update_device_object"}
-            )
-
-        return Response()
-
-    def delete(self, request, interlock_id):
-        interlock = models.Interlock.objects.get(pk=interlock_id)
-        interlock.delete()
-
-        return Response()
+        return {
+            "totalTimeSeconds": total_time.total_seconds() if total_time else 0,
+            "userStats": list(stats),
+        }
 
 
-class MemberbucksDevices(APIView):
+class MemberbucksDevices(DeviceAdminView):
     """
     get: returns a list of memberbucks devices.
     put: update a specific memberbucks device.
     delete: delete a specific memberbucks device.
     """
 
-    permission_classes = (permissions.IsAdminUser,)
+    model = models.MemberbucksDevice
 
-    def get(self, request):
-        devices = models.MemberbucksDevice.objects.all()
+    readonly_fields = {
+        **DeviceAdminView.readonly_fields,
+        "authorised": "authorised",
+    }
+    # No `defaultAccess`: a vending machine has no per-member access list, so
+    # the flag would have nothing to gate in either position.
 
-        def get_device(device):
-            # Calculate total transaction volume
-            purchases = MemberbucksProductPurchaseLog.objects.filter(
-                memberbucks_device_id=device.id, success=True
+    def get_statistics(self, device):
+        purchases = MemberbucksProductPurchaseLog.objects.filter(
+            memberbucks_device_id=device.id, success=True
+        )
+        total_volume = (
+            purchases.aggregate(total_volume=Sum("price")).get("total_volume") or 0
+        ) / 100
+
+        stats = (
+            purchases.select_related("user__profile")
+            .values("memberbucks_device_id")
+            .annotate(
+                screen_name=F("user__profile__screen_name"),
+                full_name=Concat(
+                    F("user__profile__first_name"),
+                    Value(" "),
+                    F("user__profile__last_name"),
+                    output_field=CharField(),
+                ),
+                total_purchases=Count("price"),
+                total_volume=(Sum("price") or 0) / 100,
             )
-            total_count = purchases.count()
-            total_volume = (
-                purchases.aggregate(total_volume=Sum("price")).get("total_volume") or 0
-            ) / 100
+            .order_by("-total_purchases", "-total_volume")
+        )
 
-            # Retrieve stats
-            stats = (
-                purchases.select_related("user__profile")
-                .values("memberbucks_device_id")
-                .annotate(
-                    screen_name=F("user__profile__screen_name"),
-                    full_name=Concat(
-                        F("user__profile__first_name"),
-                        Value(" "),
-                        F("user__profile__last_name"),
-                        output_field=CharField(),
-                    ),
-                    total_purchases=Count("price"),
-                    total_volume=(Sum("price") or 0) / 100,
-                )
-                .order_by("-total_purchases", "-total_volume")
-            )
-
-            return {
-                "id": device.id,
-                "authorised": device.authorised,
-                "name": device.name,
-                "description": device.description,
-                "ipAddress": device.ip_address,
-                "lastSeen": device.last_seen,
-                "offline": device.get_unavailable(),
-                # No `defaultAccess`: every active member may use a vending
-                # machine and there is no per-member link table for this type,
-                # so the flag had no mechanism behind it in either position.
-                "maintenanceLockout": device.locked_out,
-                "playThemeOnSwipe": device.play_theme,
-                "exemptFromSignin": device.exempt_signin,
-                "hiddenToMembers": device.hidden,
-                "totalPurchases": total_count,
-                "totalVolume": total_volume,
-                "userStats": list(stats),
-            }
-
-        return Response(map(get_device, devices))
-
-    def put(self, request, device_id):
-        device = models.MemberbucksDevice.objects.get(pk=device_id)
-
-        data = request.data
-
-        device.name = data.get("name")
-        device.description = data.get("description")
-        device.ip_address = data.get("ipAddress")
-
-        device.locked_out = data.get("maintenanceLockout")
-        device.play_theme = data.get("playThemeOnSwipe")
-        device.exempt_signin = data.get("exemptFromSignin")
-        device.hidden = data.get("hiddenToMembers")
-
-        device.save()
-
-        return Response()
-
-    def delete(self, request, device_id):
-        device = models.MemberbucksDevice.objects.get(pk=device_id)
-        device.delete()
-
-        return Response()
+        return {
+            "totalPurchases": purchases.count(),
+            "totalVolume": total_volume,
+            "userStats": list(stats),
+        }
 
 
 class MemberAccess(APIView):

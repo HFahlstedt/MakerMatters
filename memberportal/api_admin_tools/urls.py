@@ -47,9 +47,9 @@ urlpatterns = [
     ),
     path("api/admin/doors/", views.Doors.as_view(), name="Doors"),
     path("api/admin/interlocks/", views.Interlocks.as_view(), name="Interlocks"),
-    path("api/admin/doors/<int:door_id>/", views.Doors.as_view(), name="Doors"),
+    path("api/admin/doors/<int:device_id>/", views.Doors.as_view(), name="Doors"),
     path(
-        "api/admin/interlocks/<int:interlock_id>/",
+        "api/admin/interlocks/<int:device_id>/",
         views.Interlocks.as_view(),
         name="Interlocks",
     ),
