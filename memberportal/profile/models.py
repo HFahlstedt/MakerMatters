@@ -512,6 +512,19 @@ class Profile(ExportModelOperationsMixin("profile"), models.Model):
 
         return True if len(sessions) else False
 
+    def grant_default_access(self):
+        """Give this member every device marked as available to all members.
+
+        Both promotion routes need it — an admin using "make member", and a
+        member completing signup themselves — so it lives here rather than
+        being spelled out at each call site, where the two copies could drift.
+        """
+        # Imported here because access.models imports this module.
+        from access.models import Doors, Interlock
+
+        self.doors.add(*Doors.objects.filter(all_members=True))
+        self.interlocks.add(*Interlock.objects.filter(all_members=True))
+
     def get_basic_profile(self):
         """
         Returns a user's profile with a basic amount of info.

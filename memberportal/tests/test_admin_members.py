@@ -334,6 +334,94 @@ def test_an_unchanged_rfid_does_not_trigger_a_resync(as_admin, make_member, make
 # --------------------------------------------------------------------------
 
 
+@pytest.mark.parametrize(
+    "path,method",
+    [
+        ("/api/admin/members/{id}/state/active/", "get"),
+        ("/api/admin/members/{id}/makemember/", "post"),
+        ("/api/admin/members/{id}/access/", "get"),
+        ("/api/admin/members/{id}/sendwelcome/", "post"),
+        ("/api/admin/members/{id}/sendsms/", "post"),
+        ("/api/admin/members/{id}/logs/", "get"),
+    ],
+)
+def test_an_unknown_member_is_a_404_not_a_crash(as_admin, make_member, path, method):
+    """Every one of these looked the member up with ``User.objects.get(id=...)``.
+
+    That raises ``DoesNotExist`` for an id that is not there, which DRF does
+    not handle, so a mistyped id in the admin URL bar returned a 500 rather
+    than the 404 it plainly is.
+    """
+    make_member(state="active", rfid="MISSING-PROBE")
+
+    response = getattr(as_admin(), method)(path.format(id=999999))
+
+    assert response.status_code == 404
+
+
+def test_editing_a_profile_to_a_tag_another_member_holds_is_rejected(
+    as_admin, make_member
+):
+    """``Profile.rfid`` is unique, so this used to be an unhandled 500.
+
+    The member-facing ``/api/billing/access-card/`` already guards this; the
+    admin edit path is the same clash from the other direction.
+    """
+    from profile.models import Profile
+
+    make_member(state="active", rfid="ADMIN-TAKEN")
+    victim = make_member(state="active", rfid="ADMIN-MINE")
+
+    response = as_admin().put(
+        f"/api/admin/members/{victim.user_id}/profile/",
+        profile_payload(rfidCard="ADMIN-TAKEN"),
+        format="json",
+    )
+
+    assert response.status_code == 400
+    assert response.json() == {"success": False, "error": "accessCardInUse"}
+    assert Profile.objects.get(pk=victim.pk).rfid == "ADMIN-MINE"
+
+
+def test_editing_a_profile_keeping_the_members_own_tag_is_allowed(
+    as_admin, make_member
+):
+    """The clash check must not count the member's own tag against them."""
+    member = make_member(state="active", rfid="ADMIN-KEEP")
+
+    response = as_admin().put(
+        f"/api/admin/members/{member.user_id}/profile/",
+        profile_payload(rfidCard="ADMIN-KEEP"),
+        format="json",
+    )
+
+    assert response.status_code == 200
+
+
+def test_the_admin_and_signup_paths_grant_the_same_default_access(
+    as_admin, make_member, make_door, make_interlock, sent_emails
+):
+    """Both promotion routes granted default access with their own copy of the loop.
+
+    ``MakeMember`` and the signup completion endpoint in ``api_billing`` each
+    filtered ``all_members=True`` and looped, so the two could drift apart.
+    They now share ``Profile.grant_default_access()``.
+    """
+    from profile.models import Profile
+
+    default_door = make_door(serial="both-door", all_members=True)
+    opt_in_door = make_door(serial="both-door-2", all_members=False)
+    default_interlock = make_interlock(serial="both-int", all_members=True)
+    member = make_member(state="noob", rfid="BOTH-1")
+
+    as_admin().post(f"/api/admin/members/{member.user_id}/makemember/")
+
+    refreshed = Profile.objects.get(pk=member.pk)
+    assert list(refreshed.doors.all()) == [default_door]
+    assert opt_in_door not in refreshed.doors.all()
+    assert list(refreshed.interlocks.all()) == [default_interlock]
+
+
 def test_member_access_ignores_member_state(as_admin, make_member, make_door):
     """Admins see the underlying grants even for an inactive member.
 

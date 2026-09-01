@@ -1,5 +1,3 @@
-import json
-
 import stripe
 from constance import config
 from constance.models import Constance as ConstanceSetting
@@ -11,6 +9,7 @@ from django.db.utils import OperationalError
 from rest_framework import permissions
 from rest_framework import status
 from rest_framework.response import Response
+from rest_framework.generics import get_object_or_404
 from rest_framework.views import APIView
 from rest_framework_api_key.permissions import HasAPIKey
 from sentry_sdk import capture_exception
@@ -22,10 +21,20 @@ from memberbucks.models import (
     MemberBucks,
     MemberbucksProductPurchaseLog,
 )
-from profile.models import User, UserEventLog
+from profile.models import Profile, User, UserEventLog
 from services import sms
 from services.emails import send_email_to_admin
 from .models import MemberTier, PaymentPlan
+
+
+def get_member(member_id):
+    """Look up one member by id.
+
+    Every endpoint below did a plain ``User.objects.get()``, which raises
+    ``DoesNotExist`` for an id that is not there. DRF does not handle that, so
+    a mistyped id returned a 500 where the honest answer is a 404.
+    """
+    return get_object_or_404(User, id=member_id)
 
 
 class StripeAPIView(APIView):
@@ -73,12 +82,12 @@ class MemberState(APIView):
     permission_classes = (permissions.IsAdminUser,)
 
     def get(self, request, member_id, state=None):
-        member = User.objects.get(id=member_id)
+        member = get_member(member_id)
 
         return Response({"state": member.profile.state})
 
     def post(self, request, member_id, state):
-        member = User.objects.get(id=member_id)
+        member = get_member(member_id)
         if state == "active":
             member.profile.activate(request)
         elif state == "inactive":
@@ -97,17 +106,11 @@ class MakeMember(APIView):
     permission_classes = (permissions.IsAdminUser,)
 
     def post(self, request, member_id):
-        user = User.objects.get(id=member_id)
+        user = get_member(member_id)
 
         # if they're a new member or account only
         if user.profile.state == "noob" or user.profile.state == "accountonly":
-            # give default door access
-            for door in models.Doors.objects.filter(all_members=True):
-                user.profile.doors.add(door)
-
-            # give default interlock access
-            for interlock in models.Interlock.objects.filter(all_members=True):
-                user.profile.interlocks.add(interlock)
+            user.profile.grant_default_access()
 
             # send the welcome email
             email = user.email_welcome()
@@ -402,7 +405,7 @@ class MemberAccess(APIView):
     permission_classes = (permissions.IsAdminUser | HasAPIKey,)
 
     def get(self, request, member_id):
-        member = User.objects.get(id=member_id)
+        member = get_member(member_id)
 
         return Response(member.profile.get_access_permissions(ignore_user_state=True))
 
@@ -415,7 +418,7 @@ class MemberWelcomeEmail(APIView):
     permission_classes = (permissions.IsAdminUser,)
 
     def post(self, request, member_id):
-        member = User.objects.get(id=member_id)
+        member = get_member(member_id)
         member.email_welcome()
 
         return Response()
@@ -429,7 +432,7 @@ class MemberSendSms(APIView):
     permission_classes = (permissions.IsAdminUser,)
 
     def post(self, request, member_id):
-        member = User.objects.get(id=member_id)
+        member = get_member(member_id)
         sms_body = request.data["smsBody"]
 
         if not config.SMS_ENABLE:
@@ -473,17 +476,27 @@ class MemberProfile(APIView):
         if not member_id:
             return Response(status=status.HTTP_400_BAD_REQUEST)
 
-        body = json.loads(request.body)
-        member = User.objects.get(id=member_id)
-        rfid_changed = False
+        # request.data, not json.loads(request.body): the latter is the only
+        # place in this module that bypasses DRF's parsers, so it accepts JSON
+        # only and raises on an empty body.
+        body = request.data
+        member = get_member(member_id)
+        access_card = body.get("rfidCard")
+        rfid_changed = member.profile.rfid != access_card
 
-        if member.profile.rfid != body.get("rfidCard"):
-            rfid_changed = True
+        # Profile.rfid is unique. The member-facing endpoint already guards
+        # this; without it here the clash is an unhandled IntegrityError.
+        clash = Profile.objects.filter(rfid=access_card).exclude(pk=member.profile.pk)
+        if access_card and clash.exists():
+            return Response(
+                {"success": False, "error": "accessCardInUse"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         member.email = body.get("email")
         member.profile.first_name = body.get("firstName")
         member.profile.last_name = body.get("lastName")
-        member.profile.rfid = body.get("rfidCard")
+        member.profile.rfid = access_card
         member.profile.phone = body.get("phone")
         member.profile.screen_name = body.get("screenName")
         member.profile.vehicle_registration_plate = body.get("vehicleRegistrationPlate")
@@ -688,7 +701,7 @@ class MemberBillingInfo(StripeAPIView):
     permission_classes = (permissions.IsAdminUser | HasAPIKey,)
 
     def get(self, request, member_id):
-        member = User.objects.get(id=member_id)
+        member = get_member(member_id)
         current_plan = member.profile.membership_plan
 
         billing_info = {}
@@ -744,7 +757,7 @@ class MemberLogs(APIView):
     permission_classes = (permissions.IsAdminUser | HasAPIKey,)
 
     def get(self, request, member_id):
-        user = User.objects.get(id=member_id)
+        user = get_member(member_id)
 
         user_event_logs = []
         door_logs = []

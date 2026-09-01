@@ -2,7 +2,6 @@ from asgiref.sync import sync_to_async
 from django.http import HttpRequest
 
 from profile.models import Profile
-from access.models import Doors, Interlock
 from api_admin_tools.models import *
 
 from rest_framework import status, permissions
@@ -468,13 +467,7 @@ class CompleteSignup(StripeAPIView):
         if signupCheck["success"]:
             member_profile.activate()
 
-            # give default door access
-            for door in Doors.objects.filter(all_members=True):
-                member_profile.doors.add(door)
-
-            # give default interlock access
-            for interlock in Interlock.objects.filter(all_members=True):
-                member_profile.interlocks.add(interlock)
+            member_profile.grant_default_access()
 
             member_profile.user.email_membership_application()
             member_profile.user.email_welcome()
