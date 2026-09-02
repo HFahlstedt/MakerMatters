@@ -22,9 +22,11 @@ decision rather than a patch:
 - `AccessControlledDevice.all_members` is a column on every device type, but
   vending machines have no per-member access list for it to gate. The admin
   API no longer exposes it for that type; the column remains.
-- `Kiosks` guards read and delete with `not authenticated and not staff`, which
-  blocks only anonymous callers, so any logged-in member can list every kiosk
-  id or delete one. See `test_auth_and_session.py`.
+- A kiosk can still register itself: a `PUT /api/kiosks/` with an unrecognised
+  `kioskId` creates one with no permission check, because the guard sits inside
+  the `if id:` branch. New kiosks are unauthorised by default, so this is not a
+  login — but it is an unauthenticated write, and whether terminals should
+  self-register is a deployment decision.
 - Several smaller ones pinned in `test_auth_and_session.py`: registration reads
   `email` before checking it (a 500, not a 400); the password-reset endpoint
   reveals whether an address is registered, and 500s on an unknown token in the

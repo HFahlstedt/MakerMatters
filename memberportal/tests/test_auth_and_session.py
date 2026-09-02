@@ -919,40 +919,32 @@ def test_a_staff_member_can_list_kiosks(as_admin, make_kiosk):
     }
 
 
-def test_any_logged_in_member_can_read_the_kiosk_list(
-    make_member, as_member, make_kiosk
-):
-    """DEFECT, pinned: the staff check is inverted, so it only stops anonymous callers.
+def test_a_plain_member_cannot_read_the_kiosk_list(make_member, as_member, make_kiosk):
+    """The guards used to be inverted, admitting every logged-in member.
 
-    All three guards read::
+    All three read::
 
         if not request.user.is_authenticated and not request.user.is_staff:
             return 403
 
-    which blocks a caller who is *neither* authenticated nor staff — that is,
-    only an anonymous one. Any logged-in member passes, because the first
-    clause is already False. The intent was plainly "unless authenticated
-    **and** staff".
+    which is true only for a caller who is *neither* — an anonymous one. Any
+    logged-in member passed, because the first clause was already False.
 
-    What leaks is the ``kioskId`` of every kiosk, together with whether it is
-    authorised. That value is one of the two credentials ``/api/login/kiosk/``
-    accepts; the other is a member's raw RFID number. It should not be readable
-    by the whole membership.
+    What leaked was the ``kioskId`` of every kiosk together with its
+    ``authorised`` flag. That value is one of the two credentials
+    ``/api/login/kiosk/`` accepts; the other is a member's raw RFID number.
     """
     make_kiosk(kiosk_id="kiosk-leak")
     member = make_member(state="active", rfid="KIOSK-LEAK")
 
-    body = as_member(member).get("/api/kiosks/").json()
-
-    assert body[0]["kioskId"] == "kiosk-leak"
-    assert body[0]["authorised"] is True
+    assert as_member(member).get("/api/kiosks/").status_code == 403
 
 
-def test_any_logged_in_member_can_delete_a_kiosk(make_member, as_member, make_kiosk):
-    """DEFECT, pinned: same inverted guard on the destructive path.
+def test_a_plain_member_cannot_delete_a_kiosk(make_member, as_member, make_kiosk):
+    """Same inverted guard, on the destructive path.
 
-    Deleting a kiosk takes it out of service — every terminal that uses that
-    id stops being able to log anyone in.
+    Deleting a kiosk takes it out of service — every terminal using that id
+    stops being able to log anyone in.
     """
     from api_general.models import Kiosk
 
@@ -961,7 +953,16 @@ def test_any_logged_in_member_can_delete_a_kiosk(make_member, as_member, make_ki
 
     response = as_member(member).delete(f"/api/kiosks/{kiosk.id}/")
 
-    assert response.status_code == 200
+    assert response.status_code == 403
+    assert Kiosk.objects.filter(pk=kiosk.pk).exists()
+
+
+def test_a_staff_member_can_delete_a_kiosk(as_admin, make_kiosk):
+    from api_general.models import Kiosk
+
+    kiosk = make_kiosk(kiosk_id="kiosk-staff-delete")
+
+    assert as_admin().delete(f"/api/kiosks/{kiosk.id}/").status_code == 200
     assert not Kiosk.objects.filter(pk=kiosk.pk).exists()
 
 
@@ -988,18 +989,19 @@ def test_an_anonymous_caller_can_create_a_kiosk(api_client):
 def test_a_non_staff_member_cannot_change_kiosk_settings(
     make_member, as_member, make_kiosk
 ):
-    """The mutation block, unlike the guards, spells the condition correctly."""
+    """Both the guard and the mutation block now go through is_staff_request."""
     from api_general.models import Kiosk
 
     kiosk = make_kiosk(kiosk_id="kiosk-settings", authorised=False)
     member = make_member(state="active", rfid="KIOSK-SET")
 
-    as_member(member).put(
+    response = as_member(member).put(
         f"/api/kiosks/{kiosk.id}/",
         {"kioskId": "kiosk-settings", "name": "Renamed", "authorised": True},
         format="json",
     )
 
+    assert response.status_code == 403
     refreshed = Kiosk.objects.get(pk=kiosk.pk)
     assert refreshed.authorised is False
     assert refreshed.name != "Renamed"

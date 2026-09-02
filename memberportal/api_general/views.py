@@ -481,6 +481,17 @@ class DigitalId(APIView):
         )
 
 
+def is_staff_request(request):
+    """Whether the caller is a logged-in staff member.
+
+    Spelled out once because the guards in ``Kiosks`` each expressed it as
+    ``not request.user.is_authenticated and not request.user.is_staff``, which
+    is only true for an anonymous caller — so every logged-in member passed a
+    check meant to admit staff alone.
+    """
+    return request.user.is_authenticated and request.user.is_staff
+
+
 class Kiosks(APIView):
     """
     get: retrieves a list of all kiosks.
@@ -492,7 +503,7 @@ class Kiosks(APIView):
     permission_classes = (permissions.AllowAny,)
 
     def get(self, request):
-        if not request.user.is_authenticated and not request.user.is_staff:
+        if not is_staff_request(request):
             return Response(status=status.HTTP_403_FORBIDDEN)
 
         kiosks = Kiosk.objects.all()
@@ -521,7 +532,7 @@ class Kiosks(APIView):
                     "HTTP_X_REAL_IP", request.META.get("REMOTE_ADDR")
                 )
                 kiosk.checkin()
-                if not request.user.is_authenticated and not request.user.is_staff:
+                if not is_staff_request(request):
                     return Response(status=status.HTTP_403_FORBIDDEN)
             else:
                 kiosk = Kiosk.objects.get(kiosk_id=body.get("kioskId"))
@@ -534,7 +545,7 @@ class Kiosks(APIView):
                 play_theme=False,
             )
 
-        if request.user.is_authenticated and request.user.is_staff:
+        if is_staff_request(request):
             if body.get("playTheme"):
                 kiosk.play_theme = body.get("playTheme")
 
@@ -549,7 +560,7 @@ class Kiosks(APIView):
         return Response()
 
     def delete(self, request, id):
-        if not request.user.is_authenticated and not request.user.is_staff:
+        if not is_staff_request(request):
             return Response(status=status.HTTP_403_FORBIDDEN)
 
         kiosk = Kiosk.objects.get(id=id)
