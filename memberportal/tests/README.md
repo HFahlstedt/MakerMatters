@@ -12,8 +12,8 @@ loudly, forcing both tests to be updated together.
 
 Every defect found this way has since been fixed, and each of those tests now
 asserts the corrected behaviour while its docstring records what it used to do
-and why. Two things are still pinned as wrong, because fixing either needs a
-decision rather than a patch:
+and why. The rest are still pinned as wrong, either because fixing one needs a decision
+rather than a patch, or because nobody has asked yet:
 
 - `/api/billing/access-card/` accepts any unused tag with no proof the member
   holds that card. A duplicate is now rejected with a 400, but proving
@@ -32,6 +32,17 @@ decision rather than a patch:
   reveals whether an address is registered, and 500s on an unknown token in the
   branch that changes the password; kiosk login ignores member state; repeated
   failed logins by an unverified member mint unbounded verification tokens.
+- `MeetingList.queryset` evaluates `timezone.now()` in the class body, so
+  "upcoming" means "after the server last restarted" and drifts further from
+  the truth the longer the process stays up.
+- `SwipesList` applies its 300-row cap in Python. `[::-1]` cannot be pushed
+  into SQL, so every door and interlock log ever recorded is loaded into
+  memory on each request.
+- `/api/tools/issue/` reads `title` and `description` out of the body before
+  validating (a 500 on an absent one), cannot detect an empty description
+  because the member's name is prepended first, and writes its audit entry
+  before attempting delivery — so a report that failed every integration and
+  answered 500 is still logged as submitted.
 
 ## Running
 
@@ -68,6 +79,7 @@ opens the log file at import time.
 | `test_device_model_hierarchy.py` | What genuinely differs between the three device types — the per-type behaviour that used to live in the base class as a switch on `self.type`. |
 | `test_auth_and_session.py` | Login (password, kiosk RFID, Discourse SSO), registration, email verification, password reset, the member-facing profile, and the site sessions that `get_tags()` consults. |
 | `test_member_import_export.py` | `UserResource`, the admin's bulk member import and export — the only bulk write path, and the one where a mistake corrupts the roster silently. |
+| `test_member_tools.py` | The five member-facing `/api/tools/` endpoints: swipe feed, last-seen board, upcoming meetings, member directory and the report-an-issue form. |
 
 ## Conventions
 
