@@ -67,6 +67,7 @@ opens the log file at import time.
 | `test_access_admin_endpoints.py` | Grant/revoke, the remote device commands, and the externally callable API-key subset. |
 | `test_device_model_hierarchy.py` | What genuinely differs between the three device types — the per-type behaviour that used to live in the base class as a switch on `self.type`. |
 | `test_auth_and_session.py` | Login (password, kiosk RFID, Discourse SSO), registration, email verification, password reset, the member-facing profile, and the site sessions that `get_tags()` consults. |
+| `test_member_import_export.py` | `UserResource`, the admin's bulk member import and export — the only bulk write path, and the one where a mistake corrupts the roster silently. |
 
 ## Conventions
 
