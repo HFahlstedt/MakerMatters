@@ -32,12 +32,6 @@ rather than a patch, or because nobody has asked yet:
   reveals whether an address is registered, and 500s on an unknown token in the
   branch that changes the password; kiosk login ignores member state; repeated
   failed logins by an unverified member mint unbounded verification tokens.
-- `MeetingList.queryset` evaluates `timezone.now()` in the class body, so
-  "upcoming" means "after the server last restarted" and drifts further from
-  the truth the longer the process stays up.
-- `SwipesList` applies its 300-row cap in Python. `[::-1]` cannot be pushed
-  into SQL, so every door and interlock log ever recorded is loaded into
-  memory on each request.
 - `/api/tools/issue/` reads `title` and `description` out of the body before
   validating (a 500 on an absent one), cannot detect an empty description
   because the member's name is prepended first, and writes its audit entry

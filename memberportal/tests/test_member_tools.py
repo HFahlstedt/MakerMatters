@@ -10,11 +10,11 @@ portal -- but it does mean the directory and the swipe feed hand a member's
 movements and full name to every other member, so the authentication check
 on each is worth pinning in its own right.
 
-Two of the classes keep their queryset as a class attribute. That is an
-ordinary Django idiom and harmless for ``Lastseen``, whose filter is a
-constant; for ``MeetingList`` the filter contains ``timezone.now()``, which
-is evaluated once when the module is imported and never again. See
-``test_the_upcoming_meeting_cutoff_is_frozen_when_the_module_is_imported``.
+``Lastseen`` keeps its queryset as a class attribute, which is fine because
+its filter is a constant. ``MeetingList`` used to do the same with a filter
+containing ``timezone.now()``, so its cutoff was fixed when the module was
+imported; it builds the queryset per request now. See
+``test_the_upcoming_cutoff_is_recomputed_on_every_request``.
 """
 
 from datetime import timedelta
@@ -43,6 +43,12 @@ INTERLOCK_SWIPE_FIELDS = {
     "userOn",
     "userOff",
 }
+
+
+def cutoff_of(queryset):
+    """The datetime on the right of the queryset's single WHERE condition."""
+    (condition,) = queryset.query.where.children
+    return condition.rhs
 
 
 @pytest.fixture
@@ -190,20 +196,20 @@ def test_the_swipe_feed_is_newest_first_and_capped_at_300(
     assert doors[-1]["date"] == start + timedelta(minutes=1)
 
 
-def test_the_swipe_feed_loads_every_log_row_ever_recorded(
+def test_the_swipe_feed_asks_the_database_for_300_rows(
     as_member, make_member, make_door
 ):
-    """DEFECT, pinned: the 300 cap is applied in Python, not in SQL.
+    """The 300 cap used to be applied in Python, after loading everything.
 
-    ``DoorLog.objects.all().order_by("date")[::-1][:300]`` looks like a
-    limited query but is not one. Django refuses to push a negative slice
-    step into SQL, so ``[::-1]`` evaluates the queryset in full -- every
-    swipe ever recorded -- builds a Python list, reverses it, and only then
-    takes 300. The same applies to ``InterlockLog``.
+    ``DoorLog.objects.all().order_by("date")[::-1][:300]`` reads like a
+    limited query and is not one: Django will not push a negative slice step
+    into SQL, so ``[::-1]`` evaluated the queryset in full -- every swipe ever
+    recorded -- built a Python list, reversed it, and only then took 300. The
+    same held for ``InterlockLog``, so a space running for years loaded its
+    entire access history into memory on every request to this endpoint.
 
-    A space that has been running for years loads its entire access history
-    into memory on every request to this endpoint. ``order_by("-date")[:300]``
-    would express the same intent with a LIMIT.
+    Asserting on the emitted SQL rather than the response is the point: the
+    payload was always correct, which is why nothing else caught this.
     """
     member = make_member(state="active", rfid="SWIPE-6")
     door = make_door(serial="swipe-sql")
@@ -219,8 +225,8 @@ def test_the_swipe_feed_loads_every_log_row_ever_recorded(
         for q in queries.captured_queries
         if "access_doorlog" in q["sql"] or "access_interlocklog" in q["sql"]
     ]
-    assert log_queries, "expected the endpoint to query the log tables"
-    assert not any("LIMIT" in sql.upper() for sql in log_queries)
+    assert len(log_queries) == 2, "expected one query per log table"
+    assert all("LIMIT 300" in sql.upper() for sql in log_queries)
 
 
 # --------------------------------------------------------------------------
@@ -342,56 +348,40 @@ def test_every_member_sees_every_meeting_regardless_of_entitlement(
     assert len(as_member(noob).get("/api/tools/meetings/").data) == 1
 
 
-def test_the_upcoming_meeting_cutoff_is_frozen_when_the_module_is_imported():
-    """DEFECT, pinned: ``timezone.now()`` runs once, in the class body.
+def test_the_upcoming_cutoff_is_recomputed_on_every_request(db):
+    """The cutoff used to be frozen when the module was imported.
 
-    ``queryset = Meeting.objects.filter(date__gt=timezone.now())`` is
-    evaluated when ``api_member_tools.views`` is first imported -- process
-    start, in production. ``self.queryset.all()`` then re-runs the SQL on
-    every request, which is what makes this look correct, but the cutoff
-    baked into the WHERE clause never moves.
+    ``queryset = Meeting.objects.filter(date__gt=timezone.now())`` sat in the
+    class body, so ``now()`` ran exactly once -- at process start, in
+    production. ``self.queryset.all()`` did re-run the SQL per request, which
+    is precisely what made it look correct, but the timestamp baked into the
+    WHERE clause never moved. "Upcoming" meant "after the server last
+    restarted", and the two drifted further apart the longer the process
+    stayed up.
 
-    So "upcoming" really means "after the server last restarted", and the
-    two drift further apart the longer the process stays up. The consequence
-    is in the test below.
+    That is invisible to any test that only inspects one response, because a
+    freshly started process is momentarily right. What has to be asserted is
+    that the cutoff advances between two builds of the queryset.
     """
     from api_member_tools.views import MeetingList
 
-    (condition,) = MeetingList.queryset.query.where.children
-    cutoff = condition.rhs
+    view = MeetingList()
+    first = cutoff_of(view.get_queryset())
+    second = cutoff_of(view.get_queryset())
 
-    # A fixed datetime, not a callable or database expression that would be
-    # resolved per query -- and the same object every time it is read.
-    assert isinstance(cutoff, type(timezone.now()))
-    assert MeetingList.queryset.query.where.children[0].rhs is cutoff
+    assert second > first
 
 
-def test_a_meeting_that_has_already_happened_is_still_listed_as_upcoming(
-    as_member, make_member, make_meeting, monkeypatch
+def test_a_meeting_that_has_already_happened_is_not_listed(
+    as_member, make_member, make_meeting
 ):
-    """DEFECT, pinned: the visible consequence of the frozen cutoff.
-
-    Uptime is simulated rather than waited for: the queryset is rebuilt with
-    exactly the expression in the class body, evaluated as it would have been
-    an hour ago. A meeting that started thirty minutes ago is then still
-    reported as upcoming, because it is after the cutoff even though it is
-    before now.
-    """
-    from api_meeting.models import Meeting
-    from api_member_tools.views import MeetingList
-
-    monkeypatch.setattr(
-        MeetingList,
-        "queryset",
-        Meeting.objects.filter(date__gt=timezone.now() - timedelta(hours=1)),
-    )
     member = make_member(state="active", rfid="MEET-4")
-    finished = make_meeting(date=timezone.now() - timedelta(minutes=30))
+    make_meeting(date=timezone.now() - timedelta(minutes=30))
+    upcoming = make_meeting(date=timezone.now() + timedelta(days=1))
 
-    (entry,) = as_member(member).get("/api/tools/meetings/").data
+    body = as_member(member).get("/api/tools/meetings/").data
 
-    assert entry["id"] == finished.id
-    assert finished.date < timezone.now()
+    assert [entry["id"] for entry in body] == [upcoming.id]
 
 
 # --------------------------------------------------------------------------

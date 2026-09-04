@@ -24,15 +24,18 @@ class SwipesList(APIView):
     permission_classes = (permissions.IsAuthenticated,)
 
     def get(self, request):
+        # Ordered descending in SQL rather than ascending-then-reversed in
+        # Python: a negative slice step cannot be pushed into a query, so
+        # ``order_by("date")[::-1][:300]`` loaded the whole table first.
         recent_doors = (
             DoorLog.objects.all()
             .select_related("user__profile")
-            .order_by("date")[::-1][:300]
+            .order_by("-date")[:300]
         )
         recent_interlocks = (
             InterlockLog.objects.all()
             .select_related("user_started__profile", "user_ended__profile")
-            .order_by("date_updated")[::-1][:300]
+            .order_by("-date_updated")[:300]
         )
 
         doors = []
@@ -322,7 +325,15 @@ class MeetingList(APIView):
     """
 
     permission_classes = (permissions.IsAuthenticated,)
-    queryset = Meeting.objects.filter(date__gt=timezone.now())
+
+    def get_queryset(self):
+        """Built per request.
+
+        This was a class attribute, which meant ``timezone.now()`` ran once
+        when the module was imported and "upcoming" quietly came to mean
+        "after the server last restarted".
+        """
+        return Meeting.objects.filter(date__gt=timezone.now())
 
     def get(self, request):
         def get_meeting(meeting):
@@ -334,7 +345,7 @@ class MeetingList(APIView):
                 "date": date,
             }
 
-        response = list(map(get_meeting, self.queryset.all()))
+        response = list(map(get_meeting, self.get_queryset()))
 
         return Response(response)
 
