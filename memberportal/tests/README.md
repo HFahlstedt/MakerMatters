@@ -37,6 +37,13 @@ rather than a patch, or because nobody has asked yet:
   because the member's name is prepended first, and writes its audit entry
   before attempting delivery — so a report that failed every integration and
   answered 500 is still logged as submitted.
+- The memberbucks wallet, pinned in `test_memberbucks_api.py`: two payments
+  submitted together can both pass the balance check and overdraw it; a portal
+  payment is saved as `"web"`, which is not a declared transaction type; a
+  top-up is sent to Stripe even when the member has no saved card (a 500) or
+  Stripe is disabled; the balance list's circulation total silently excludes
+  balances of 1,000 or more; and the transaction history loads a member's whole
+  ledger before cutting it to 100.
 
 ## Running
 
@@ -74,6 +81,7 @@ opens the log file at import time.
 | `test_auth_and_session.py` | Login (password, kiosk RFID, Discourse SSO), registration, email verification, password reset, the member-facing profile, and the site sessions that `get_tags()` consults. |
 | `test_member_import_export.py` | `UserResource`, the admin's bulk member import and export — the only bulk write path, and the one where a mistake corrupts the roster silently. |
 | `test_member_tools.py` | The five member-facing `/api/tools/` endpoints: swipe feed, last-seen board, upcoming meetings, member directory and the report-an-issue form. |
+| `test_memberbucks_api.py` | The member wallet: balance, transaction history, card top-up, portal payments, and the admin balance list. The only member-facing endpoints that move money. |
 
 ## Conventions
 
