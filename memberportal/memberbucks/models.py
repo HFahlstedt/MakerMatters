@@ -23,6 +23,7 @@ class MemberBucks(ExportModelOperationsMixin("memberbucks"), models.Model):
             "interlock",
             "Interlock Cost",
         ),  # used to track automatic debits from interlock sessions
+        ("web", "Portal Payment"),  # used to track debits made in the portal
         ("other", "Other"),
     )
 

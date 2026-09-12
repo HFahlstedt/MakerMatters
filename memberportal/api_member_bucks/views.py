@@ -1,4 +1,5 @@
-from django.db.models import Sum
+from django.db import transaction
+from django.db.models import F, Sum
 from rest_framework_api_key.permissions import HasAPIKey
 
 from profile.models import Profile
@@ -34,9 +35,11 @@ class MemberBucksTransactions(APIView):
     permission_classes = (permissions.IsAuthenticated,)
 
     def get(self, request):
+        # Descending in SQL: ``order_by("date")[::-1][:100]`` could not be pushed
+        # into a query, so it loaded the member's whole ledger first.
         recent_transactions = MemberBucks.objects.filter(user=request.user).order_by(
-            "date"
-        )[::-1][:100]
+            "-date"
+        )[:100]
 
         def get_transaction(transaction):
             return transaction.get_transaction_display()
@@ -66,6 +69,13 @@ class MemberBucksAddFunds(StripeAPIView):
     """
 
     def post(self, request, amount=None):
+        # The flag otherwise only decides whether an API key is set, and the
+        # charge below would still be attempted without one.
+        if not config.ENABLE_STRIPE:
+            return Response(
+                "Card payments are disabled.", status=status.HTTP_403_FORBIDDEN
+            )
+
         profile = request.user.profile
 
         # check if we got an amount, and if it's less than or equal to 50 dollars
@@ -75,6 +85,14 @@ class MemberBucksAddFunds(StripeAPIView):
         else:
             return Response(
                 "Invalid amount specified", status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # An off-session charge needs both. Without them Stripe raises an
+        # InvalidRequestError, which is not the CardError handled below.
+        if not (profile.stripe_customer_id and profile.stripe_payment_method_id):
+            return Response(
+                "No saved card. Add a card before topping up.",
+                status=status.HTTP_400_BAD_REQUEST,
             )
 
         try:
@@ -131,17 +149,32 @@ class MemberBucksDonateFunds(APIView):
                 "Invalid amount specified", status=status.HTTP_400_BAD_REQUEST
             )
 
-        if profile.memberbucks_balance < amount / 100:
-            return Response("Not enough funds", status=status.HTTP_400_BAD_REQUEST)
+        debit = amount / 100
 
-        MemberBucks.objects.create(
-            transaction_type="web",
-            user=profile.user,
-            amount=abs(amount / 100) * -1,  # make sure it's always negative!
-            description=request.data.get(
-                "description", "No description. Manual payment via portal."
-            ),
-        )
+        with transaction.atomic():
+            # Check and claim the funds in one statement. Reading the balance
+            # and comparing it in Python let two payments both pass before
+            # either wrote. select_for_update would close that on PostgreSQL
+            # and MySQL, but SQLite ignores it; a conditional UPDATE is atomic
+            # on all three.
+            claimed = Profile.objects.filter(
+                pk=profile.pk, memberbucks_balance__gte=debit
+            ).update(memberbucks_balance=F("memberbucks_balance") - debit)
+
+            if not claimed:
+                return Response("Not enough funds", status=status.HTTP_400_BAD_REQUEST)
+
+            # Saving the entry re-derives the balance from the whole ledger,
+            # which lands on the same figure the UPDATE above left behind.
+            MemberBucks.objects.create(
+                transaction_type="web",
+                user=profile.user,
+                amount=abs(debit) * -1,  # make sure it's always negative!
+                description=request.data.get(
+                    "description", "No description. Manual payment via portal."
+                ),
+            )
+
         return Response()
 
 

@@ -45,11 +45,15 @@ export const MemberProfileSchema = z.object({
 
 export type MemberProfile = z.infer<typeof MemberProfileSchema>;
 
+// The display labels from MemberBucks.TRANSACTION_TYPES, which is what the
+// transactions endpoint returns in `type`.
 export enum MemberTransactionType {
   stripe = 'Stripe Top-up',
   bank = 'Bank Transfer',
   cash = 'Cash',
   card = 'Membership Card',
+  interlock = 'Interlock Cost',
+  web = 'Portal Payment',
   other = 'Other',
 }
 export const MemberTransactionTypeSchema = z.nativeEnum(MemberTransactionType);

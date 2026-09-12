@@ -37,13 +37,10 @@ rather than a patch, or because nobody has asked yet:
   because the member's name is prepended first, and writes its audit entry
   before attempting delivery — so a report that failed every integration and
   answered 500 is still logged as submitted.
-- The memberbucks wallet, pinned in `test_memberbucks_api.py`: two payments
-  submitted together can both pass the balance check and overdraw it; a portal
-  payment is saved as `"web"`, which is not a declared transaction type; a
-  top-up is sent to Stripe even when the member has no saved card (a 500) or
-  Stripe is disabled; the balance list's circulation total silently excludes
-  balances of 1,000 or more; and the transaction history loads a member's whole
-  ledger before cutting it to 100.
+- The memberbucks balance list's circulation total silently excludes balances
+  of 1,000 or more, while the per-member list beside it does not. The threshold
+  may be deliberate — to leave out test or treasurer accounts — so whether to
+  remove it, document it or make it configurable is a decision.
 
 ## Running
 

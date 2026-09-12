@@ -10,9 +10,11 @@ Two things about the model shape everything below.
 
 The balance on ``Profile`` is not a running total that endpoints adjust. It
 is re-derived on every ``MemberBucks.save()`` as the sum of the member's
-whole ledger, so it cannot drift from the transactions that make it up. What
-that does *not* give is any protection between reading the balance and
-writing a debit -- see ``test_two_simultaneous_payments_can_overdraw_a_wallet``.
+whole ledger, so it cannot drift from the transactions that make it up. That
+alone did not stop two payments both passing a balance check made before
+either wrote; a portal payment now claims its funds in the same statement that
+checks them -- see
+``test_a_second_payment_cannot_spend_money_the_first_already_claimed``.
 
 And the two endpoints that move money take their amount in different units
 behind identical-looking URLs: ``add/<amount>/`` is whole dollars,
@@ -189,14 +191,13 @@ def test_the_transaction_list_is_newest_first_and_capped_at_100(make_member):
     assert body[-1]["description"] == "#1"
 
 
-def test_the_transaction_list_loads_the_members_whole_ledger(make_member):
-    """DEFECT, pinned: the 100 cap is applied in Python, not in SQL.
+def test_the_transaction_list_asks_the_database_for_100_rows(make_member):
+    """The 100 cap used to be applied in Python, after loading everything.
 
     ``order_by("date")[::-1][:100]`` -- the same pattern that loaded the whole
     access log in ``SwipesList``. Django will not push a negative slice step
-    into a query, so every transaction the member has ever made is fetched,
-    reversed in Python, and only then cut to 100. Scoped to one member, so the
-    cost grows with a member's history rather than the whole space's.
+    into a query, so every transaction the member had ever made was fetched,
+    reversed in Python, and only then cut to 100.
     """
     member = make_member(state="active", rfid="WALLET-TX-4")
     credit(member, 1)
@@ -212,7 +213,7 @@ def test_the_transaction_list_loads_the_members_whole_ledger(make_member):
         and "SUM(" not in q["sql"].upper()
     ]
     assert len(ledger_queries) == 1
-    assert "LIMIT" not in ledger_queries[0].upper()
+    assert "LIMIT 100" in ledger_queries[0].upper()
 
 
 # --------------------------------------------------------------------------
@@ -279,43 +280,61 @@ def test_a_payment_larger_than_the_balance_is_rejected(make_member):
     assert MemberBucks.objects.count() == 1
 
 
-def test_a_portal_payment_is_recorded_under_an_undeclared_type(make_member):
-    """DEFECT, pinned: ``"web"`` is not one of ``TRANSACTION_TYPES``.
+def test_a_payment_of_exactly_the_balance_is_allowed(make_member):
+    """The boundary of the funds check, which moved into a database filter."""
+    member = make_member(state="active", rfid="WALLET-PAY-EXACT")
+    credit(member, 10)
 
-    The model declares stripe, bank, cash, card, interlock and other. Django
-    does not enforce ``choices`` at the database, so the row saves -- but
-    ``get_transaction_type_display()`` has no label to return and falls back
-    to the raw value. Every other entry in a member's history reads "Cash" or
-    "Stripe Top-up"; a portal payment reads "web".
+    response = fresh_client(member).post("/api/memberbucks/pay/1000/")
+
+    assert response.status_code == 200
+    member.refresh_from_db()
+    assert member.memberbucks_balance == 0.0
+
+
+def test_a_portal_payment_is_labelled_in_the_history(make_member):
+    """A portal payment used to be saved under a type the model did not declare.
+
+    The view writes ``"web"``, which was missing from ``TRANSACTION_TYPES``.
+    Django does not enforce ``choices`` at the database, so the row saved, but
+    ``get_transaction_type_display()`` had no label and fell back to the raw
+    value: every other entry read "Cash" or "Stripe Top-up", a portal payment
+    read "web". The type was declared rather than the view changed, so the
+    rows already saved as "web" gain the label too.
     """
+    from memberbucks.models import MemberBucks
+
     member = make_member(state="active", rfid="WALLET-PAY-4")
     credit(member, 10)
 
     fresh_client(member).post("/api/memberbucks/pay/100/")
 
-    from memberbucks.models import MemberBucks
-
-    assert "web" not in dict(MemberBucks.TRANSACTION_TYPES)
+    assert MemberBucks.objects.latest("id").transaction_type == "web"
     newest = fresh_client(member).get("/api/memberbucks/transactions/").json()[0]
-    assert newest["type"] == "web"
+    assert newest["type"] == "Portal Payment"
 
 
-def test_two_simultaneous_payments_can_overdraw_a_wallet(make_member, monkeypatch):
-    """DEFECT, pinned: the balance check and the debit are not atomic.
+def test_a_second_payment_cannot_spend_money_the_first_already_claimed(
+    make_member, monkeypatch
+):
+    """Two payments submitted together used to overdraw a wallet.
 
-    ``MemberBucksDonateFunds`` reads the balance, compares, and then writes.
-    Nothing holds a lock between those steps, so two requests that arrive
-    together can both read the old balance, both pass, and both debit.
+    ``MemberBucksDonateFunds`` read the balance, compared, and then wrote, with
+    nothing held between. Two requests arriving together could both read the
+    old balance, both pass, and both debit: $10.00 and two $8.00 payments
+    ended at -$6.00, both answered 200.
 
-    The interleaving is forced rather than left to chance: the second request
-    is fired from inside the first one's write, after the first has passed its
-    check but before its debit lands. Each request loads its own user, as real
-    ones do. $10.00 and two $8.00 payments ends at -$6.00, with both answered
-    200.
+    The funds are now claimed by a single conditional ``UPDATE`` -- decrement
+    the balance only where it covers the payment -- and the ledger entry is
+    written only if that matched a row. That is atomic on every backend this
+    project supports, unlike ``select_for_update``, which SQLite ignores.
 
-    The ledger itself stays consistent -- the balance is re-derived from it --
-    so this is an overdraw, not a lost transaction. A member can only race
-    their own wallet, but a double-tapped "pay" button is enough to do it.
+    The interleaving is forced as before: the second request fires from inside
+    the first one's ledger write, after the first has claimed its funds. What
+    this proves is that the check and the claim are now one step that happens
+    before the write. It runs on one database connection, so it does not
+    exercise two real connections contending for the row; that part rests on
+    the atomicity of a single UPDATE statement.
     """
     from memberbucks.models import MemberBucks
 
@@ -326,8 +345,8 @@ def test_two_simultaneous_payments_can_overdraw_a_wallet(make_member, monkeypatc
     second = {}
 
     def save_racing_a_second_request(self, *args, **kwargs):
-        # Claimed before the request is sent, or the second request's own
-        # debit would fire a third.
+        # Claimed before the request is sent, so a second debit could not fire
+        # a third.
         if self.amount < 0 and not second:
             second["status"] = None
             second["status"] = (
@@ -340,8 +359,9 @@ def test_two_simultaneous_payments_can_overdraw_a_wallet(make_member, monkeypatc
     first_status = fresh_client(member).post("/api/memberbucks/pay/800/").status_code
 
     member.refresh_from_db()
-    assert (first_status, second["status"]) == (200, 200)
-    assert member.memberbucks_balance == -6.0
+    assert (first_status, second["status"]) == (200, 400)
+    assert member.memberbucks_balance == 2.0
+    assert MemberBucks.objects.filter(amount__lt=0).count() == 1
 
 
 # --------------------------------------------------------------------------
@@ -428,46 +448,57 @@ def test_an_unsettled_payment_is_refused_without_crediting(
     assert not MemberBucks.objects.exists()
 
 
-def test_a_member_with_no_saved_card_is_charged_anyway(make_member, stripe_stub):
-    """DEFECT, pinned: nothing checks for a card before calling Stripe.
+@pytest.mark.parametrize(
+    "customer,payment_method",
+    [("", ""), ("cus_test", ""), ("", "pm_test"), (None, None)],
+)
+def test_a_member_without_a_saved_card_is_refused_before_stripe_is_called(
+    make_member, stripe_stub, customer, payment_method
+):
+    """A top-up with no card used to reach Stripe and come back as a 500.
 
-    A member who never saved one has empty strings for both ids, and those go
-    to ``PaymentIntent.create`` as they are. Stripe answers with an
-    ``InvalidRequestError``, which is not the ``CardError`` the view catches,
-    so the member gets a 500 instead of being told to add a card.
+    A member who never saved a card has empty ids, and those went to
+    ``PaymentIntent.create`` as they were. Stripe answers with an
+    ``InvalidRequestError``, which is not the ``CardError`` the view catches.
+    Both ids are needed for an off-session charge, so either one missing is
+    refused.
     """
-    member = make_member(state="active", rfid="WALLET-NOCARD")
-    stripe_stub.set(
-        "PaymentIntent.create",
-        stripe.error.InvalidRequestError("No such customer: ''", "customer"),
+    from memberbucks.models import MemberBucks
+
+    member = make_member(
+        state="active",
+        rfid="WALLET-NOCARD",
+        stripe_customer_id=customer,
+        stripe_payment_method_id=payment_method,
     )
 
-    with pytest.raises(stripe.error.InvalidRequestError):
-        fresh_client(member).post("/api/memberbucks/add/10/")
+    response = fresh_client(member).post("/api/memberbucks/add/10/")
 
-    ((_, _, charge),) = stripe_stub.calls_to("PaymentIntent.create")
-    assert (charge["customer"], charge["payment_method"]) == ("", "")
+    assert response.status_code == 400
+    assert "saved card" in response.data
+    assert not stripe_stub.called("PaymentIntent.create")
+    assert not MemberBucks.objects.exists()
 
 
-def test_a_top_up_is_attempted_even_with_stripe_disabled(
+def test_a_top_up_is_refused_while_stripe_is_disabled(
     member_with_card, stripe_stub, set_config
 ):
-    """DEFECT, pinned: ``ENABLE_STRIPE`` only decides whether a key is set.
+    """``ENABLE_STRIPE`` used to decide only whether an API key was set.
 
     ``StripeAPIView.__init__`` returns early when Stripe is disabled, skipping
-    ``stripe.api_key = ...`` -- and that is all the flag does. The view goes on
-    to create a payment intent regardless. Against the real SDK that fails
-    for want of a key, as an ``AuthenticationError`` nothing catches; the stub
-    here stands in for it so what is pinned is the attempt itself.
+    ``stripe.api_key = ...``, and the view went on to create a payment intent
+    regardless -- an ``AuthenticationError`` against the real SDK, uncaught.
+    The 403 matches how ``api_access`` answers an API switched off in config.
     """
+    from memberbucks.models import MemberBucks
+
     set_config(ENABLE_STRIPE=False)
-    stripe_stub.set(
-        "PaymentIntent.create", FakeStripeObject(status="requires_payment_method")
-    )
 
-    fresh_client(member_with_card).post("/api/memberbucks/add/10/")
+    response = fresh_client(member_with_card).post("/api/memberbucks/add/10/")
 
-    assert stripe_stub.called("PaymentIntent.create")
+    assert response.status_code == 403
+    assert not stripe_stub.called("PaymentIntent.create")
+    assert not MemberBucks.objects.exists()
 
 
 # --------------------------------------------------------------------------
