@@ -52,18 +52,6 @@ def cutoff_of(queryset):
 
 
 @pytest.fixture
-def make_meeting(db):
-    from api_meeting.models import Meeting
-
-    def _make(date=None, type="general", **kwargs):
-        return Meeting.objects.create(
-            date=date or (timezone.now() + timedelta(days=7)), type=type, **kwargs
-        )
-
-    return _make
-
-
-@pytest.fixture
 def integrations_off(set_config):
     """Every issue-reporting integration disabled.
 

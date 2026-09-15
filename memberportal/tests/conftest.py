@@ -113,6 +113,22 @@ def make_member(db):
 
 
 @pytest.fixture
+def make_meeting(db):
+    """A meeting a week from now unless told otherwise."""
+    from datetime import timedelta
+
+    from api_meeting.models import Meeting
+    from django.utils import timezone
+
+    def _make(date=None, type="general", **kwargs):
+        return Meeting.objects.create(
+            date=date or (timezone.now() + timedelta(days=7)), type=type, **kwargs
+        )
+
+    return _make
+
+
+@pytest.fixture
 def device_api_key(db):
     """A valid raw API key string that devices authenticate with.
 
