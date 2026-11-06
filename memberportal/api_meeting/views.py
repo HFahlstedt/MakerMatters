@@ -1,5 +1,7 @@
 from .models import Meeting, ProxyVote
 from profile.models import Profile
+from django.db import transaction
+from django.utils import timezone
 from django.utils.timezone import make_aware, localtime
 from datetime import datetime
 
@@ -7,6 +9,59 @@ from rest_framework import status, permissions
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from services.emails import send_single_email
+
+PORTAL_DATE_FORMAT = "%Y-%m-%d %H:%M"
+
+
+def parse_meeting_date(value):
+    """
+    Read a meeting date as the portal form writes it ("2031-12-01 18:30") or
+    as ISO 8601 ("2031-12-01T18:30"). A string with no offset is read in the
+    server's TIME_ZONE. Returns None for anything else, so the caller can
+    answer 400 instead of raising.
+    """
+    if not isinstance(value, str):
+        return None
+
+    try:
+        parsed = datetime.strptime(value, PORTAL_DATE_FORMAT)
+    except ValueError:
+        try:
+            parsed = datetime.fromisoformat(value)
+        except ValueError:
+            return None
+
+    return make_aware(parsed) if timezone.is_naive(parsed) else parsed
+
+
+def email_member(to_user, subject, message, actor):
+    send_single_email(
+        to_email=to_user.email,
+        subject=subject,
+        template_vars={"title": subject, "message": message},
+        user=actor,
+    )
+
+
+def notify_proxy_removed(proxy, actor, reason):
+    """Tell both members that a proxy no longer stands, and why."""
+    meeting = proxy.meeting
+    when = f"{meeting.get_type()} meeting on {localtime(meeting.date)}"
+    holder = proxy.proxy_user.profile.get_full_name()
+
+    subject = f"Your proxy for the {meeting.get_type()} meeting no longer stands"
+    email_member(
+        proxy.proxy_user,
+        subject,
+        f"{proxy.user.profile.get_full_name()} is no longer relying on you as a proxy for the {when}: {reason}.",
+        actor,
+    )
+    email_member(
+        proxy.user,
+        f"{holder} is no longer your proxy for the {meeting.get_type()} meeting",
+        f"{holder} is no longer your proxy for the {when}: {reason}. You can manage this proxy from the member portal.",
+        actor,
+    )
 
 
 class Meetings(APIView):
@@ -51,21 +106,36 @@ class Meetings(APIView):
     def post(self, request):
         body = request.data
 
-        meeting = Meeting.objects.create(
-            date=make_aware(datetime.strptime(body["date"], "%Y-%m-%d %H:%M")),
-            type=body["type"]["value"],
-            chair=body["chair"],
-        )
+        date = parse_meeting_date(body.get("date"))
+        if date is None:
+            return Response(
+                {"error": "date must be YYYY-MM-DD HH:MM or ISO 8601"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
-        meeting.save()
+        meeting_type = body["type"]["value"]
+        if meeting_type not in dict(Meeting.MEETING_TYPES):
+            return Response(
+                {"error": f"unknown meeting type {meeting_type!r}"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        Meeting.objects.create(date=date, type=meeting_type, chair=body["chair"])
 
         return Response({"success": True})
 
     def put(self, request, meeting_id):
         body = request.data
 
+        date = parse_meeting_date(body.get("date"))
+        if date is None:
+            return Response(
+                {"error": "date must be YYYY-MM-DD HH:MM or ISO 8601"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
         meeting = Meeting.objects.get(id=meeting_id)
-        meeting.date = make_aware(datetime.strptime(body["date"], "%Y-%m-%d %H:%M"))
+        meeting.date = date
         meeting.chair = body["chair"]
         meeting.save()
 
@@ -73,7 +143,15 @@ class Meetings(APIView):
 
     def delete(self, request, meeting_id):
         meeting = Meeting.objects.get(id=meeting_id)
+        # The proxies go with the meeting (on_delete=CASCADE); tell the members
+        # who relied on them, as revoking one by hand would.
+        proxies = list(
+            meeting.proxyvote_set.select_related("user", "proxy_user", "meeting")
+        )
         meeting.delete()
+
+        for proxy in proxies:
+            notify_proxy_removed(proxy, request.user, "the meeting has been deleted")
 
         return Response()
 
@@ -107,18 +185,43 @@ class Proxies(APIView):
         proxy_city = body.get("proxyCity")
         meeting_id = body.get("meeting")
 
-        existing_proxies = ProxyVote.objects.filter(
-            user=request.user, meeting_id=meeting_id
+        # Everything is checked before anything is deleted: a refused request
+        # must leave an existing appointment alone.
+        if not (member_city and proxy_id and proxy_city and meeting_id):
+            return Response(status=status.HTTP_400_BAD_REQUEST)
+
+        meeting = Meeting.objects.filter(pk=meeting_id).first()
+        proxy_profile = (
+            Profile.objects.filter(id=proxy_id).select_related("user").first()
         )
+        if meeting is None or proxy_profile is None:
+            return Response(
+                {"error": "unknown meeting or proxy"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        proxy_user = proxy_profile.user
+        problem = None
+        if meeting.date <= timezone.now():
+            problem = "that meeting has already taken place"
+        elif proxy_user == request.user:
+            problem = "you cannot be your own proxy"
+        elif proxy_profile.state != "active":
+            problem = "a proxy must be an active member"
+
+        if problem:
+            return Response({"error": problem}, status=status.HTTP_400_BAD_REQUEST)
 
         # if the user already has a proxy for this meeting we'll override it
-        if existing_proxies:
-            for proxy in existing_proxies:
+        with transaction.atomic():
+            replaced = list(
+                ProxyVote.objects.filter(
+                    user=request.user, meeting=meeting
+                ).select_related("user", "proxy_user", "meeting")
+            )
+            for proxy in replaced:
                 proxy.delete()
 
-        if member_city and proxy_id and proxy_city and meeting_id:
-            meeting = Meeting.objects.get(pk=meeting_id)
-            proxy_user = Profile.objects.get(id=proxy_id).user
             ProxyVote.objects.create(
                 user=request.user,
                 user_city=member_city,
@@ -127,67 +230,48 @@ class Proxies(APIView):
                 meeting=meeting,
             )
 
-            subject = (
-                f"{request.user.profile.get_full_name()} just assigned you as a proxy"
-            )
-            message = f"{request.user.profile.get_full_name()} just assigned you as a proxy for the {meeting.get_type()} meeting on {localtime(meeting.date)}."
-            send_single_email(
-                to_email=proxy_user.email,
-                subject=subject,
-                template_vars={
-                    "title": subject,
-                    "message": message,
-                },
-                user=request.user,
-            )
+        # The member who was holding the replaced proxy believes they still
+        # carry the vote. Skip them if they are the new holder as well.
+        for proxy in replaced:
+            if proxy.proxy_user != proxy_user:
+                email_member(
+                    proxy.proxy_user,
+                    f"{request.user.profile.get_full_name()} has appointed someone else as their proxy",
+                    f"{request.user.profile.get_full_name()} has appointed a different proxy for the {meeting.get_type()} meeting on {localtime(meeting.date)}, so you no longer hold their vote.",
+                    request.user,
+                )
 
-            subject = f"{proxy_user.profile.get_full_name()} is confirmed as your proxy for the {meeting.get_type()} meeting"
-            message = f"{proxy_user.profile.get_full_name()} is confirmed as your proxy for the {meeting.get_type()} meeting on {localtime(meeting.date)}. You can manage this proxy from the member portal."
-            send_single_email(
-                to_email=request.user.email,
-                subject=subject,
-                template_vars={"title": subject, "message": message},
-                user=request.user,
-            )
+        subject = f"{request.user.profile.get_full_name()} just assigned you as a proxy"
+        message = f"{request.user.profile.get_full_name()} just assigned you as a proxy for the {meeting.get_type()} meeting on {localtime(meeting.date)}."
+        email_member(proxy_user, subject, message, request.user)
 
-            return Response({"success": True})
+        subject = f"{proxy_user.profile.get_full_name()} is confirmed as your proxy for the {meeting.get_type()} meeting"
+        message = f"{proxy_user.profile.get_full_name()} is confirmed as your proxy for the {meeting.get_type()} meeting on {localtime(meeting.date)}. You can manage this proxy from the member portal."
+        email_member(request.user, subject, message, request.user)
 
-        else:
-            return Response(status=status.HTTP_400_BAD_REQUEST)
+        return Response({"success": True})
 
     def delete(self, request, proxy_id):
-        proxy = ProxyVote.objects.get(id=proxy_id)
+        proxy = (
+            ProxyVote.objects.filter(id=proxy_id)
+            .select_related("user", "proxy_user", "meeting")
+            .first()
+        )
+        if proxy is None:
+            return Response(status=status.HTTP_404_NOT_FOUND)
 
-        if request.user == proxy.user:
-            proxy.delete()
-            subject = (
-                f"{request.user.profile.get_full_name()} just removed you as a proxy"
-            )
-            message = f"{request.user.profile.get_full_name()} just removed you as a proxy for the {proxy.meeting.get_type()} meeting on {localtime(proxy.meeting.date)}."
-            send_single_email(
-                to_email=proxy.proxy_user.email,
-                subject=subject,
-                template_vars={
-                    "title": subject,
-                    "message": message,
-                },
-                user=request.user,
-            )
-
-            subject = f"{proxy.proxy_user.profile.get_full_name()} is no longer your proxy for the {proxy.meeting.get_type()} meeting"
-            message = f"{proxy.proxy_user.profile.get_full_name()} is no longer your proxy for the {proxy.meeting.get_type()} meeting on {localtime(proxy.meeting.date)}. You can manage this proxy from the member portal."
-            send_single_email(
-                to_email=request.user.email,
-                subject=subject,
-                template_vars={
-                    "title": subject,
-                    "message": message,
-                },
-                user=request.user,
-            )
-            return Response()
-        else:
+        if request.user != proxy.user:
             return Response(status=status.HTTP_403_FORBIDDEN)
+
+        proxy.delete()
+        subject = f"{request.user.profile.get_full_name()} just removed you as a proxy"
+        message = f"{request.user.profile.get_full_name()} just removed you as a proxy for the {proxy.meeting.get_type()} meeting on {localtime(proxy.meeting.date)}."
+        email_member(proxy.proxy_user, subject, message, request.user)
+
+        subject = f"{proxy.proxy_user.profile.get_full_name()} is no longer your proxy for the {proxy.meeting.get_type()} meeting"
+        message = f"{proxy.proxy_user.profile.get_full_name()} is no longer your proxy for the {proxy.meeting.get_type()} meeting on {localtime(proxy.meeting.date)}. You can manage this proxy from the member portal."
+        email_member(request.user, subject, message, request.user)
+        return Response()
 
 
 class MeetingTypes(APIView):

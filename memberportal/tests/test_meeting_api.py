@@ -182,38 +182,59 @@ def test_an_admin_creates_a_meeting_in_the_servers_timezone(as_admin, settings):
     assert (meeting.type, meeting.chair) == ("general", "Sam")
 
 
-def test_a_meeting_date_in_iso_format_raises(as_admin):
-    """DEFECT, pinned: one exact format, parsed with no fallback.
+def test_a_meeting_date_in_iso_format_is_accepted(as_admin):
+    """Used to raise ``ValueError`` (a 500): one exact format, no fallback.
 
-    ``strptime(body["date"], "%Y-%m-%d %H:%M")`` accepts the portal form's
-    format and nothing else. The ISO ``2031-12-01T18:30`` any other client
-    would send is a ``ValueError`` -- a 500 rather than a 400.
-    """
-    with pytest.raises(ValueError):
-        as_admin().post(
-            "/api/meetings/",
-            {"date": "2031-12-01T18:30", "type": {"value": "general"}, "chair": "Sam"},
-            format="json",
-        )
-
-
-def test_a_meeting_can_be_created_with_an_undeclared_type(as_admin):
-    """DEFECT, pinned: the type is stored without checking ``MEETING_TYPES``.
-
-    Choices are not enforced by the database, so "picnic" saves. The admin list
-    then shows the raw value as its display name, and a proxy email calls it
-    "the picnic meeting".
+    ``strptime(body["date"], "%Y-%m-%d %H:%M")`` accepted the portal form's
+    format and nothing else, so the ISO ``2031-12-01T18:30`` any other client
+    would send blew up. ISO is read too now; an offset is honoured, and a
+    string without one is read in TIME_ZONE as before.
     """
     from api_meeting.models import Meeting
 
-    as_admin().post(
+    response = as_admin().post(
+        "/api/meetings/",
+        {"date": "2031-12-01T18:30", "type": {"value": "general"}, "chair": "Sam"},
+        format="json",
+    )
+
+    assert response.status_code == 200
+    assert localtime(Meeting.objects.get().date).strftime("%Y-%m-%d %H:%M") == (
+        "2031-12-01 18:30"
+    )
+
+
+@pytest.mark.parametrize("date", ["next tuesday", "", None, 20311201])
+def test_a_meeting_date_that_cannot_be_read_is_a_400(as_admin, date):
+    from api_meeting.models import Meeting
+
+    response = as_admin().post(
+        "/api/meetings/",
+        {"date": date, "type": {"value": "general"}, "chair": "Sam"},
+        format="json",
+    )
+
+    assert response.status_code == 400
+    assert not Meeting.objects.exists()
+
+
+def test_a_meeting_cannot_be_created_with_an_undeclared_type(as_admin):
+    """Used to store the type without checking ``MEETING_TYPES``.
+
+    Choices are not enforced by the database, so "picnic" saved. The admin list
+    then showed the raw value as its display name, and a proxy email called it
+    "the picnic meeting". It is a 400 now and nothing is written.
+    """
+    from api_meeting.models import Meeting
+
+    response = as_admin().post(
         "/api/meetings/",
         {"date": "2031-12-01 18:30", "type": {"value": "picnic"}, "chair": "Sam"},
         format="json",
     )
 
-    assert Meeting.objects.get().type == "picnic"
-    assert as_admin().get("/api/meetings/").data[0]["type"] == "picnic"
+    assert response.status_code == 400
+    assert not Meeting.objects.exists()
 
 
 def test_an_update_changes_date_and_chair_but_never_the_type(as_admin, make_meeting):
@@ -254,15 +275,15 @@ def test_a_past_meeting_can_still_be_moved(as_admin, make_meeting):
     assert meeting.date > timezone.now()
 
 
-def test_deleting_a_meeting_silently_discards_its_proxies(
+def test_deleting_a_meeting_tells_the_members_its_proxies_go_with_it(
     as_admin, make_member, make_meeting, sent_emails
 ):
-    """DEFECT, pinned: a cascade nobody is told about.
+    """Used to be a cascade nobody was told about.
 
     ``ProxyVote.meeting`` is ``on_delete=CASCADE``, so every proxy attached to
     a deleted meeting goes with it. Revoking a single proxy emails both
-    members; deleting the meeting that holds fifty emails nobody, and a member
-    who appointed a proxy has no way to learn it no longer exists.
+    members, but deleting the meeting that held fifty emailed nobody. Both
+    members of each proxy are emailed now, as a revocation would.
     """
     from api_meeting.models import ProxyVote
 
@@ -275,7 +296,13 @@ def test_deleting_a_meeting_silently_discards_its_proxies(
 
     assert response.status_code == 200
     assert not ProxyVote.objects.exists()
-    assert sent_emails == []
+    assert [(e["To"], e["Subject"]) for e in sent_emails] == [
+        (holder.user.email, "Your proxy for the General meeting no longer stands"),
+        (
+            giver.user.email,
+            "Test Member2 is no longer your proxy for the General meeting",
+        ),
+    ]
 
 
 # --------------------------------------------------------------------------
@@ -402,15 +429,17 @@ def test_one_member_can_hold_any_number_of_proxies(make_member, make_meeting):
 # --------------------------------------------------------------------------
 
 
-def test_a_proxy_can_be_appointed_for_a_meeting_that_has_passed(
+def test_a_proxy_cannot_be_appointed_for_a_meeting_that_has_passed(
     make_member, make_meeting
 ):
-    """DEFECT, pinned: the meeting's date is never checked.
+    """Used to accept any meeting id: the meeting's date was never checked.
 
-    The form offers only upcoming meetings, but the endpoint takes any meeting
-    id. (Until the frozen cutoff in ``MeetingList`` was fixed, the form offered
-    past meetings too, so this was reachable from the portal itself.)
+    The form offers only upcoming meetings. (Until the frozen cutoff in
+    ``MeetingList`` was fixed, it offered past meetings too, so this was
+    reachable from the portal itself.) The endpoint now refuses with a 400.
     """
+    from api_meeting.models import ProxyVote
+
     giver = make_member(state="active", rfid="PROXY-PAST-1")
     holder = make_member(state="active", rfid="PROXY-PAST-2")
     past = make_meeting(date=timezone.now() - timedelta(days=30))
@@ -419,11 +448,14 @@ def test_a_proxy_can_be_appointed_for_a_meeting_that_has_passed(
         "/api/proxies/", proxy_body(past, holder), format="json"
     )
 
-    assert response.status_code == 200
+    assert response.status_code == 400
+    assert not ProxyVote.objects.exists()
 
 
-def test_a_member_can_appoint_themselves_as_their_own_proxy(make_member, make_meeting):
-    """DEFECT, pinned: nothing compares the two members."""
+def test_a_member_cannot_appoint_themselves_as_their_own_proxy(
+    make_member, make_meeting
+):
+    """Used to be accepted: nothing compared the two members."""
     from api_meeting.models import ProxyVote
 
     member = make_member(state="active", rfid="PROXY-SELF")
@@ -432,18 +464,21 @@ def test_a_member_can_appoint_themselves_as_their_own_proxy(make_member, make_me
         "/api/proxies/", proxy_body(make_meeting(), member), format="json"
     )
 
-    assert response.status_code == 200
-    vote = ProxyVote.objects.get()
-    assert vote.user == vote.proxy_user
+    assert response.status_code == 400
+    assert not ProxyVote.objects.exists()
 
 
 @pytest.mark.parametrize("state", ["inactive", "noob", "accountonly"])
-def test_a_member_who_is_not_active_can_be_appointed(make_member, make_meeting, state):
-    """DEFECT, pinned: the holder's membership state is never checked.
+def test_a_member_who_is_not_active_cannot_be_appointed(
+    make_member, make_meeting, state
+):
+    """Used to accept any profile id: the holder's state was never checked.
 
     The directory the form draws from lists active members only; the endpoint
-    accepts any profile id, including someone whose membership has lapsed.
+    took anyone, including someone whose membership had lapsed.
     """
+    from api_meeting.models import ProxyVote
+
     giver = make_member(state="active", rfid=f"PROXY-STATE-A-{state}")
     holder = make_member(state=state, rfid=f"PROXY-STATE-B-{state}")
 
@@ -451,7 +486,8 @@ def test_a_member_who_is_not_active_can_be_appointed(make_member, make_meeting, 
         "/api/proxies/", proxy_body(make_meeting(), holder), format="json"
     )
 
-    assert response.status_code == 200
+    assert response.status_code == 400
+    assert not ProxyVote.objects.exists()
 
 
 # --------------------------------------------------------------------------
@@ -459,15 +495,15 @@ def test_a_member_who_is_not_active_can_be_appointed(make_member, make_meeting, 
 # --------------------------------------------------------------------------
 
 
-def test_replacing_a_proxy_never_tells_the_member_who_was_replaced(
+def test_replacing_a_proxy_tells_the_member_who_was_replaced(
     make_member, make_meeting, sent_emails
 ):
-    """DEFECT, pinned: the old appointment is deleted without notice.
+    """Used to delete the old appointment without notice.
 
     Appointing a second proxy for the same meeting deletes the first and
-    creates the new one. The new holder and the member are both emailed; the
-    member who was holding the proxy is not, and will still believe they are
-    carrying that vote. Revoking a proxy outright does email them.
+    creates the new one. The new holder and the member were both emailed; the
+    member who had been holding the proxy was not, and would still believe they
+    were carrying that vote. They are emailed first now, as a revocation would.
     """
     from api_meeting.models import ProxyVote
 
@@ -483,20 +519,43 @@ def test_replacing_a_proxy_never_tells_the_member_who_was_replaced(
 
     assert ProxyVote.objects.get().proxy_user == second.user
     recipients = [email["To"] for email in sent_emails]
-    assert recipients == [second.user.email, giver.user.email]
-    assert first.user.email not in recipients
+    assert recipients == [first.user.email, second.user.email, giver.user.email]
+
+
+def test_resubmitting_the_same_holder_does_not_email_them_twice(
+    make_member, make_meeting, sent_emails
+):
+    """Changing only the cities replaces the row but not the holder."""
+    from api_meeting.models import ProxyVote
+
+    giver = make_member(state="active", rfid="PROXY-SAME-1")
+    holder = make_member(state="active", rfid="PROXY-SAME-2")
+    meeting = make_meeting()
+    client = client_for(giver)
+    client.post("/api/proxies/", proxy_body(meeting, holder), format="json")
+    sent_emails.clear()
+
+    client.post(
+        "/api/proxies/", proxy_body(meeting, holder, proxyCity="Malmo"), format="json"
+    )
+
+    assert ProxyVote.objects.get().proxy_city == "Malmo"
+    assert [email["To"] for email in sent_emails] == [
+        holder.user.email,
+        giver.user.email,
+    ]
 
 
 @pytest.mark.parametrize("missing", ["memberCity", "proxy", "proxyCity"])
-def test_an_incomplete_resubmission_revokes_the_existing_proxy(
+def test_an_incomplete_resubmission_leaves_the_existing_proxy_alone(
     make_member, make_meeting, sent_emails, missing
 ):
-    """DEFECT, pinned: the old proxy is deleted before the request is checked.
+    """Used to delete the old proxy before the request was checked.
 
-    ``post`` deletes any proxy the member already holds for that meeting, and
-    only then tests whether the new request is complete. An incomplete one is
-    refused with a 400 -- after destroying a valid appointment, and without an
-    email to either member.
+    ``post`` deleted any proxy the member already held for that meeting, and
+    only then tested whether the new request was complete. An incomplete one
+    was refused with a 400 -- after destroying a valid appointment, and without
+    an email to either member. Nothing is touched now.
     """
     from api_meeting.models import ProxyVote
 
@@ -512,24 +571,21 @@ def test_an_incomplete_resubmission_revokes_the_existing_proxy(
     )
 
     assert response.status_code == 400
-    assert not ProxyVote.objects.exists()
+    assert ProxyVote.objects.get().proxy_user == holder.user
     assert sent_emails == []
 
 
-def test_an_unknown_holder_raises_after_the_existing_proxy_is_gone(
+def test_an_unknown_holder_is_a_400_and_the_existing_proxy_survives(
     make_member, make_meeting
 ):
-    """DEFECT, pinned: the same ordering, ending in an exception.
+    """Used to raise after the existing proxy was already gone.
 
     With a complete request naming a profile that does not exist,
-    ``Profile.objects.get`` raises -- a 500 -- once the deletion has already
-    run. ``ATOMIC_REQUESTS`` is not set in settings.py, so in production that
-    deletion is committed on its own and the member is left with no proxy.
-    (The test database wraps the whole test in a transaction, so here the
-    row's absence is observed before any rollback.)
+    ``Profile.objects.get`` raised -- a 500 -- once the deletion had run.
+    ``ATOMIC_REQUESTS`` is not set in settings.py, so in production that
+    deletion was committed on its own and the member was left with no proxy.
     """
     from api_meeting.models import ProxyVote
-    from profile.models import Profile
 
     giver = make_member(state="active", rfid="PROXY-GHOST-1")
     holder = make_member(state="active", rfid="PROXY-GHOST-2")
@@ -537,11 +593,27 @@ def test_an_unknown_holder_raises_after_the_existing_proxy_is_gone(
     client = client_for(giver)
     client.post("/api/proxies/", proxy_body(meeting, holder), format="json")
 
-    with pytest.raises(Profile.DoesNotExist):
-        client.post(
-            "/api/proxies/", proxy_body(meeting, holder, proxy=99999), format="json"
-        )
+    response = client.post(
+        "/api/proxies/", proxy_body(meeting, holder, proxy=99999), format="json"
+    )
 
+    assert response.status_code == 400
+    assert ProxyVote.objects.get().proxy_user == holder.user
+
+
+def test_an_unknown_meeting_is_a_400(make_member, make_meeting):
+    from api_meeting.models import ProxyVote
+
+    giver = make_member(state="active", rfid="PROXY-NOMEET-1")
+    holder = make_member(state="active", rfid="PROXY-NOMEET-2")
+
+    response = client_for(giver).post(
+        "/api/proxies/",
+        proxy_body(make_meeting(), holder) | {"meeting": 99999},
+        format="json",
+    )
+
+    assert response.status_code == 400
     assert not ProxyVote.objects.exists()
 
 
@@ -596,11 +668,10 @@ def test_only_the_appointing_member_can_revoke(
     assert sent_emails == []
 
 
-def test_revoking_an_unknown_proxy_raises(make_member):
-    """DEFECT, pinned: ``ProxyVote.objects.get(id=...)`` is unchecked -- a 500."""
-    from api_meeting.models import ProxyVote
-
+def test_revoking_an_unknown_proxy_is_a_404(make_member):
+    """Used to be an unchecked ``ProxyVote.objects.get(id=...)`` -- a 500."""
     member = make_member(state="active", rfid="PROXY-UNKNOWN")
 
-    with pytest.raises(ProxyVote.DoesNotExist):
-        client_for(member).delete("/api/proxies/99999/")
+    response = client_for(member).delete("/api/proxies/99999/")
+
+    assert response.status_code == 404
