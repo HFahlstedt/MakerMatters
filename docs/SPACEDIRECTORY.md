@@ -41,6 +41,7 @@ You can do this with the following command:
 
 ```bash
 curl -X POST -H 'Authorization: Api-Key <Your API KEY>' \
+    -H 'Content-Type: application/json' \
     -d '{"is_open": true, "message": "Open Night TONIGHT! All Welcome between 1800hrs and 2300hrs"}' \
     https://<your_membermatters_installation>/api/spacedirectory/update
 ```
@@ -54,6 +55,10 @@ By default, MemberMatters exposes the total number of active members and how man
 To update a sensor or property value, you just need to POST the appropriate JSON to `https://<your_membermatters_installation>/api/spacedirectory/update` as laid out below.
 
 **NOTE**: If a sensor or property is missing from the database then it will be created.  If it exists but the value is not included or changed, it will not be updated.
+
+A sensor is identified by its `name` alone, so every sensor needs its own name. A new sensor needs a `name` and a `type` (one of the SpaceAPI sensor types: `temperature`, `barometer`, `radiation`, `humidity`, `beverage_supply`, `power_consumption`, `wind`, `network_connections`, `account_balance` or `network_traffic`); `location`, `description`, `unit` and `value` are optional. A new property needs a `name`, a `value` and a `unit`. Values are numbers, stored to three decimal places.
+
+The update is all or nothing. If any part of it is invalid the response is a `400` with an `{"error": ...}` message and nothing is changed. The `lastchange` time only moves when `is_open` or `message` actually changes, so it is safe to post sensor readings as often as you like.
 
 #### Sensors *without* properties
 
@@ -89,7 +94,7 @@ Want to update more than one sensor at a time? No worries, just add to the array
         },
         { 
             "type": "humidity",
-            "name": "test_sensor",
+            "name": "test_humidity_sensor",
             "location": "default",
             "description": "This is a sensor",
             "unit": "%H",
@@ -115,7 +120,7 @@ For those sensors that do have properties, only a few extra fields are required:
                 {
                     "name": "gust",
                     "unit": "m/s",
-                    "speed": 5.0
+                    "value": 5.0
                 }
             ]
         }
@@ -138,12 +143,12 @@ As with the sensors, additional properties can be created by adding more diction
                 {
                     "name": "speed",
                     "unit": "m/s",
-                    "speed": 5.0
+                    "value": 5.0
                 },
                 {
                     "name": "gust",
                     "unit": "m/s",
-                    "speed": 9.0
+                    "value": 9.0
                 }
             ]
         }
@@ -158,7 +163,7 @@ The following JSON updates the space status to "Open", sets a message advising t
 ```json
 
 {   "is_open": true,
-    "message": "Soldering workshop tonight - 8pm to 10pm"
+    "message": "Soldering workshop tonight - 8pm to 10pm",
     "sensors": [
         { 
             "type": "temperature",
@@ -177,12 +182,12 @@ The following JSON updates the space status to "Open", sets a message advising t
                 {
                     "name": "speed",
                     "unit": "m/s",
-                    "speed": 5.0
+                    "value": 5.0
                 },
                 {
                     "name": "gust",
                     "unit": "m/s",
-                    "speed": 9.0
+                    "value": 9.0
                 }
             ]
         }

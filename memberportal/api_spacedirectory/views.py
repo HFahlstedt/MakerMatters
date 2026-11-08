@@ -1,3 +1,6 @@
+from decimal import Decimal, InvalidOperation
+from django.core.exceptions import ValidationError
+from django.db import transaction
 from rest_framework.response import Response
 from rest_framework import status, permissions
 from rest_framework_api_key.permissions import HasAPIKey
@@ -10,6 +13,148 @@ import json
 import logging
 
 logger = logging.getLogger("api_spacedirectory")
+
+# SpaceAPISensor.value and SpaceAPISensorProperties.value are DecimalField(10, 3).
+VALUE_PLACES = Decimal("0.001")
+VALUE_MAX = Decimal(10) ** 7
+
+TRUE_WORDS = {"true", "t", "yes", "on", "1"}
+FALSE_WORDS = {"false", "f", "no", "off", "0"}
+
+
+def get_space():
+    """The one SpaceAPI row, created closed the first time anyone needs it.
+
+    No migration creates it, so a fresh install that ticks "enable" would
+    otherwise get a 500 until an administrator adds the row by hand.
+    """
+    space = SpaceAPI.objects.order_by("pk").first()
+    if space is None:
+        space = SpaceAPI.objects.create()
+    return space
+
+
+def json_list(setting_name):
+    """A Constance setting that holds a JSON list; anything else is no list.
+
+    These are free-text boxes in the admin, so a typo must cost the list, not
+    the whole public document.
+    """
+    raw = getattr(config, setting_name)
+    if not raw or not str(raw).strip():
+        return []
+
+    try:
+        value = json.loads(raw)
+    except (TypeError, ValueError):
+        value = None
+
+    if not isinstance(value, list):
+        logger.error(f"{setting_name} is not a JSON list, ignoring it: {raw!r}")
+        return []
+
+    return value
+
+
+def parse_bool(value, field):
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int) and value in (0, 1):
+        return bool(value)
+    if isinstance(value, str):
+        word = value.strip().lower()
+        if word in TRUE_WORDS:
+            return True
+        if word in FALSE_WORDS:
+            return False
+
+    raise ValidationError(f"{field} must be true or false.")
+
+
+def parse_value(value, field, nullable):
+    """A reading as the column will hold it: three decimal places, 7 digits before.
+
+    Not ``full_clean()``: Django turns a float into a Decimal at the column's
+    ten significant digits, so a plain 21.3 arrives as 21.30000000 and fails
+    the three-places check, though ``save()`` rounds it happily.
+    """
+    if value is None and nullable:
+        return None
+
+    if isinstance(value, bool) or not isinstance(value, (int, float, str, Decimal)):
+        raise ValidationError(f"{field} must be a number.")
+
+    try:
+        number = Decimal(str(value).strip())
+    except InvalidOperation:
+        raise ValidationError(f"{field} must be a number, not {value!r}.")
+
+    if not number.is_finite() or abs(number) >= VALUE_MAX:
+        raise ValidationError(f"{field} {value!r} is out of range.")
+
+    return number.quantize(VALUE_PLACES)
+
+
+def apply_property(sensor, payload):
+    if not isinstance(payload, dict) or not str(payload.get("name") or "").strip():
+        raise ValidationError(f"{sensor.name}: every property needs a name.")
+
+    name = payload["name"]
+    label = f"{sensor.name}/{name}"
+    prop = sensor.properties.filter(name=name).order_by("pk").first()
+
+    if prop is None:
+        missing = [key for key in ("value", "unit") if key not in payload]
+        if missing:
+            raise ValidationError(
+                f"{label} is new, so it needs a {' and a '.join(missing)}."
+            )
+        prop = SpaceAPISensorProperties(sensor_id=sensor, name=name)
+
+    if "value" in payload:
+        prop.value = parse_value(payload["value"], f"{label} value", nullable=False)
+    if "unit" in payload:
+        prop.unit = payload["unit"]
+
+    prop.full_clean(exclude=["value"])
+    prop.save()
+
+
+def apply_sensor(payload):
+    """Create or update one sensor, found by name. Raises ValidationError."""
+    if not isinstance(payload, dict):
+        raise ValidationError("Each sensor must be an object.")
+
+    name = payload.get("name")
+    if not isinstance(name, str) or not name.strip():
+        raise ValidationError("Every sensor needs a name.")
+
+    sensor = SpaceAPISensor.objects.filter(name=name).order_by("pk").first()
+    if sensor is None:
+        if "type" not in payload:
+            raise ValidationError(f"{name} is new, so it needs a type.")
+        sensor = SpaceAPISensor(name=name)
+
+    for key, attribute in (
+        ("type", "sensor_type"),
+        ("unit", "unit"),
+        ("location", "location"),
+        ("description", "description"),
+    ):
+        if key in payload:
+            setattr(sensor, attribute, payload[key])
+
+    if "value" in payload:
+        sensor.value = parse_value(payload["value"], f"{name} value", nullable=True)
+
+    sensor.full_clean(exclude=["value"])
+    sensor.save()
+
+    properties = payload.get("properties", [])
+    if not isinstance(properties, list):
+        raise ValidationError(f"{name}: properties must be a list.")
+    for prop in properties:
+        apply_property(sensor, prop)
 
 
 class SpaceDirectoryStatus(APIView):
@@ -40,12 +185,12 @@ class SpaceDirectoryStatus(APIView):
                     "spacesaml": config.SPACE_DIRECTORY_FED_SPACESAML,
                     "spacephone": config.SPACE_DIRECTORY_FED_SPACEPHONE,
                 },
-                "projects": json.loads(config.SPACE_DIRECTORY_PROJECTS),
+                "projects": json_list("SPACE_DIRECTORY_PROJECTS"),
                 "issue_report_channels": ["email"],
             }
 
             # Get the default data
-            spaceapi_data = SpaceAPI.objects.get()
+            spaceapi_data = get_space()
 
             # Get a list of all the sensors
             spaceapi_sensors = SpaceAPISensor.objects.all()
@@ -93,8 +238,9 @@ class SpaceDirectoryStatus(APIView):
             ]
 
             # Is the camera array empty? If not, add them
-            if not config.SPACE_DIRECTORY_CAMS:
-                spaceapi["cameras"] = config.SPACE_DIRECTORY_CAMS
+            cameras = json_list("SPACE_DIRECTORY_CAMS")
+            if cameras:
+                spaceapi["cameras"] = cameras
 
             # Set the STATE part of the schema, the icons, and the schema version
             spaceapi["state"] = {
@@ -128,85 +274,51 @@ class SpaceDirectoryUpdate(APIView):
     permission_classes = (permissions.IsAdminUser | HasAPIKey,)
 
     def post(self, request):
-        # Get the current state of the space
-        current_status = SpaceAPI.objects.get()
+        data = request.data
+        if not any(key in data for key in ("is_open", "message", "sensors")):
+            return Response(
+                {
+                    "error": "Nothing to update: send is_open, message or sensors "
+                    "as a JSON body with Content-Type: application/json."
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
-        ## Do we need to update the open/closed status
-        if "is_open" in request.data:
-            current_status.space_is_open = request.data["is_open"]
+        try:
+            # All or nothing: a request that fails half way changes nothing.
+            with transaction.atomic():
+                current_status = get_space()
+                changed = False
 
-        ## Do we need to update the message?
-        if "message" in request.data:
-            current_status.space_message = request.data["message"]
+                if "is_open" in data:
+                    is_open = parse_bool(data["is_open"], "is_open")
+                    changed |= current_status.space_is_open != is_open
+                    current_status.space_is_open = is_open
 
-        ## Do we have any sensor data?
-        if "sensors" in request.data:
-            for sensor in request.data["sensors"]:
-                ### See if we have an existing sensor, if we do, update it,
-                ### if we don't, create it.
-                try:
-                    current_sensor = (
-                        SpaceAPISensor.objects.all().filter(name=sensor["name"]).first()
-                    )
-                    logger.debug(f"Found sensor: {current_sensor}")
-                    if "type" in sensor:
-                        current_sensor.sensor_type = sensor["type"]
-                    if "value" in sensor:
-                        current_sensor.value = sensor["value"]
-                    if "unit" in sensor:
-                        current_sensor.unit = sensor["unit"]
-                    if "location" in sensor:
-                        current_sensor.location = sensor["location"]
-                    if "description" in sensor:
-                        current_sensor.description = sensor["description"]
+                if "message" in data:
+                    message = data["message"]
+                    if message is not None and not isinstance(message, str):
+                        raise ValidationError("message must be text or null.")
+                    changed |= current_status.space_message != message
+                    current_status.space_message = message
 
-                    if "properties" in sensor:
-                        for prop in sensor["properties"]:
-                            #### Does the property exist? If so, update,
-                            #### if not, create
-                            try:
-                                current_prop = SpaceAPISensorProperties.objects.filter(
-                                    name=prop["name"], sensor_id=current_sensor
-                                ).get()
-                                logger.debug(f"Found property: {current_prop}")
-                                if "name" in prop:
-                                    current_prop.name = prop["name"]
-                                if "value" in prop:
-                                    current_prop.value = prop["value"]
-                                if "unit" in prop:
-                                    current_prop.unit = prop["unit"]
-                                current_prop.save()
-                            except:
-                                new_prop = SpaceAPISensorProperties()
-                                new_prop.name = prop["name"]
-                                new_prop.value = prop["value"]
-                                new_prop.unit = prop["unit"]
-                                new_prop.sensor_id = current_sensor
-                                new_prop.save()
+                if "sensors" in data:
+                    sensors = data["sensors"]
+                    if not isinstance(sensors, list):
+                        raise ValidationError("sensors must be a list.")
+                    for sensor in sensors:
+                        apply_sensor(sensor)
 
-                    current_sensor.save()
-                except Exception as e:
-                    new_sensor = SpaceAPISensor()
-                    new_sensor.sensor_type = sensor["type"]
-                    new_sensor.name = sensor["name"]
-                    if "value" in sensor:
-                        new_sensor.value = sensor["value"]
-                    if "unit" in sensor:
-                        new_sensor.unit = sensor["unit"]
-                    new_sensor.location = sensor["location"]
-                    new_sensor.description = sensor["description"]
-                    new_sensor.save()
+                # status_last_change is auto_now, so saving moves it. Only the
+                # open state and the message are the space's state; a sensor
+                # reading every minute is not a change of it.
+                if changed:
+                    current_status.full_clean()
+                    current_status.save()
 
-                    if "properties" in sensor:
-                        ## This is a new sensor, we will always want to create the properties
-                        for prop in sensor["properties"]:
-                            new_prop = SpaceAPISensorProperties()
-                            new_prop.name = prop["name"]
-                            new_prop.value = prop["value"]
-                            new_prop.unit = prop["unit"]
-                            new_prop.sensor_id = new_sensor
-                            new_prop.save()
-
-        current_status.save()
+        except ValidationError as e:
+            return Response(
+                {"error": " ".join(e.messages)}, status=status.HTTP_400_BAD_REQUEST
+            )
 
         return Response()

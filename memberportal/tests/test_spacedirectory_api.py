@@ -18,9 +18,11 @@ the tests treat its examples as the contract.
 """
 
 import json
+from datetime import timedelta
 
 import pytest
 from django.core.exceptions import ValidationError
+from django.utils import timezone
 
 pytestmark = pytest.mark.django_db
 
@@ -116,18 +118,26 @@ def wind(properties, **overrides):
     return sensor
 
 
-def as_committed():
-    """Let the test keep querying after a ``save()`` raised.
+class RecordingLogger:
+    def __init__(self):
+        self.errors = []
 
-    pytest-django wraps each test in a transaction, and Django marks it broken
-    when a ``save()`` inside raises. Production has no such wrapper
-    (``ATOMIC_REQUESTS`` is unset), so whatever the view wrote before the
-    exception is already committed and the next query works. Clearing the flag
-    reproduces that.
-    """
-    from django.db import connection
+    def error(self, message, *args, **kwargs):
+        self.errors.append(message)
 
-    connection.needs_rollback = False
+    def __getattr__(self, name):
+        return lambda *args, **kwargs: None
+
+
+def age(space):
+    """Push the last change a day into the past, so that a bump is visible."""
+    from api_spacedirectory.models import SpaceAPI
+
+    SpaceAPI.objects.filter(pk=space.pk).update(
+        status_last_change=timezone.now() - timedelta(days=1)
+    )
+    space.refresh_from_db()
+    return space.status_last_change
 
 
 def sensors_named(name):
@@ -332,52 +342,65 @@ def test_sensor_values_are_json_numbers_not_strings(api_client, space):
 # --------------------------------------------------------------------------
 
 
-def test_enabling_the_directory_without_a_spaceapi_row_is_a_500(api_client, set_config):
-    """DEFECT, pinned: a fresh install cannot use the feature it just turned on.
+def test_enabling_the_directory_on_a_fresh_install_creates_a_closed_space(
+    api_client, set_config
+):
+    """Used to be a 500: a fresh install could not use the feature it enabled.
 
-    No migration creates the ``SpaceAPI`` row, and the view does
+    No migration creates the ``SpaceAPI`` row, and the view did
     ``SpaceAPI.objects.get()``. Ticking "Enable Space Directory" in Constance
-    therefore turns a 404 into a 500 until an administrator happens to add
-    the row in the Django admin.
+    turned a 404 into a 500 until an administrator happened to add the row in
+    the Django admin. It is created on first use now, closed -- the model's
+    own comment says a space must never show as open by accident.
     """
     from api_spacedirectory.models import SpaceAPI
 
     set_config(ENABLE_SPACE_DIRECTORY=True)
+    assert not SpaceAPI.objects.exists()
 
-    with pytest.raises(SpaceAPI.DoesNotExist):
-        api_client.get(URL)
+    assert document(api_client)["state"]["open"] is False
+    document(api_client)
+
+    assert SpaceAPI.objects.count() == 1
 
 
-def test_cameras_are_never_published_for_a_configured_list(
-    api_client, space, set_config
-):
-    """DEFECT, pinned: the condition is inverted, and the value is a string.
+def test_cameras_are_published_when_a_list_is_configured(api_client, space, set_config):
+    """Used to be inverted: the key appeared only when the setting was empty.
 
-    ``if not config.SPACE_DIRECTORY_CAMS: spaceapi["cameras"] = ...`` adds the
-    key only when the setting is empty. The default ``"[]"`` is a non-empty
-    string, and so is a real list of URLs, so neither emits it; only a blank
-    setting does, as ``""``. And when it does fire the value is the raw string
-    -- ``projects`` is run through ``json.loads``, ``cameras`` is not.
+    ``if not config.SPACE_DIRECTORY_CAMS`` added it for a blank setting, as
+    ``""``, and never for the default ``"[]"`` or a real list. The value was
+    also the raw string, where ``projects`` was run through ``json.loads``.
     """
-    assert "cameras" not in document(api_client)
+    assert "cameras" not in document(api_client)  # the shipped default, "[]"
 
     set_config(SPACE_DIRECTORY_CAMS='["https://example.test/cam.jpg"]')
-    assert "cameras" not in document(api_client)
+    assert document(api_client)["cameras"] == ["https://example.test/cam.jpg"]
 
     set_config(SPACE_DIRECTORY_CAMS="")
-    assert document(api_client)["cameras"] == ""
+    assert "cameras" not in document(api_client)
 
 
-def test_invalid_json_in_the_projects_setting_is_a_500(api_client, space, set_config):
-    """DEFECT, pinned: ``json.loads(config.SPACE_DIRECTORY_PROJECTS)`` is bare.
+@pytest.mark.parametrize(
+    "bad", ["https://wiki.example.test", '{"a": 1}', "[unterminated", "null"]
+)
+def test_a_projects_setting_that_is_not_a_json_list_is_ignored_and_logged(
+    api_client, space, set_config, monkeypatch, bad
+):
+    """Used to be a 500: ``json.loads(config.SPACE_DIRECTORY_PROJECTS)`` was bare.
 
-    The setting is a free-text box in the Constance admin, so a typo there
-    takes the whole public document down rather than just the projects list.
+    The setting is a free-text box in the Constance admin, so a typo there took
+    the whole public document down rather than just the projects list.
     """
-    set_config(SPACE_DIRECTORY_PROJECTS="https://wiki.example.test")
+    import api_spacedirectory.views as views
 
-    with pytest.raises(json.JSONDecodeError):
-        api_client.get(URL)
+    log = RecordingLogger()
+    monkeypatch.setattr(views, "logger", log)
+    set_config(SPACE_DIRECTORY_PROJECTS=bad)
+
+    body = document(api_client)
+
+    assert body["projects"] == []
+    assert len(log.errors) == 1 and "SPACE_DIRECTORY_PROJECTS" in log.errors[0]
 
 
 # --------------------------------------------------------------------------
@@ -565,19 +588,43 @@ def test_a_sensor_is_identified_by_its_name_alone(as_admin, space):
     assert (sensor.sensor_type, float(sensor.value)) == ("humidity", 45.0)
 
 
-def test_an_update_bumps_the_last_change_time_even_when_nothing_about_the_state_changed(
-    as_admin, space
-):
-    """DEFECT, pinned: ``lastchange`` moves on every POST.
+def test_a_sensor_report_does_not_move_the_last_change_time(as_admin, space):
+    """Used to move on every POST.
 
-    ``status_last_change`` is ``auto_now`` and the view always calls
-    ``current_status.save()``. A weather station reporting every minute
-    therefore reports the space as having "changed" every minute, which is the
-    one field directories use to say how long it has been open or closed.
+    ``status_last_change`` is ``auto_now`` and the view always saved the row,
+    so a weather station reporting every minute reported the space as having
+    "changed" every minute -- the one field directories use to say how long it
+    has been open or closed. It is saved only when the state changed now.
     """
-    before = space.status_last_change
+    before = age(space)
 
     as_admin().post(UPDATE, {"sensors": [temperature()]}, format="json")
+
+    space.refresh_from_db()
+    assert space.status_last_change == before
+
+
+def test_repeating_the_current_state_does_not_move_the_last_change_time(
+    as_admin, space
+):
+    space.space_is_open = True
+    space.space_message = "Open"
+    space.save()
+    before = age(space)
+
+    as_admin().post(UPDATE, {"is_open": True, "message": "Open"}, format="json")
+
+    space.refresh_from_db()
+    assert space.status_last_change == before
+
+
+@pytest.mark.parametrize("body", [{"is_open": True}, {"message": "Back at 8"}])
+def test_changing_the_open_state_or_the_message_moves_the_last_change_time(
+    as_admin, space, body
+):
+    before = age(space)
+
+    as_admin().post(UPDATE, body, format="json")
 
     space.refresh_from_db()
     assert space.status_last_change > before
@@ -588,29 +635,61 @@ def test_an_update_bumps_the_last_change_time_even_when_nothing_about_the_state_
 # --------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("value", ["true", "false"])
-def test_is_open_as_a_string_is_a_500(as_admin, space, value):
-    """DEFECT, pinned: the value goes into a BooleanField unchecked.
+@pytest.mark.parametrize(
+    "value, expected",
+    [
+        ("true", True),
+        ("True", True),
+        ("1", True),
+        ("yes", True),
+        (1, True),
+        ("false", False),
+        ("no", False),
+        (0, False),
+    ],
+)
+def test_is_open_accepts_quoted_and_numeric_booleans(as_admin, space, value, expected):
+    """Used to raise at save time for "true"/"false": JSON ``true`` worked, but
+    a form-encoded client, or anything that quotes its booleans, sent a string
+    and ``BooleanField.to_python`` accepts only the Python spellings."""
+    space.space_is_open = not expected
+    space.save()
 
-    JSON ``true`` works. A form-encoded client, or anything that quotes its
-    booleans, sends a string, and ``BooleanField.to_python`` accepts only
-    ``"True"``/``"False"``/``"t"``/``"f"``/``"1"``/``"0"`` -- so ``"true"``
-    raises when the row is saved, after the request has otherwise been
-    accepted.
-    """
-    with pytest.raises(ValidationError):
-        as_admin().post(UPDATE, {"is_open": value}, format="json")
+    response = as_admin().post(UPDATE, {"is_open": value}, format="json")
+
+    assert response.status_code == 200
+    space.refresh_from_db()
+    assert space.space_is_open is expected
 
 
-def test_the_documented_curl_command_does_nothing_and_answers_200(as_admin, space):
-    """DEFECT, pinned: the example in the docs sends the wrong content type.
+@pytest.mark.parametrize("value", ["maybe", "", 2, None, [], {"a": 1}])
+def test_is_open_that_is_not_a_boolean_is_a_400_and_changes_nothing(
+    as_admin, space, value
+):
+    space.space_message = "keep"
+    space.save()
+
+    response = as_admin().post(
+        UPDATE, {"is_open": value, "message": "changed"}, format="json"
+    )
+
+    assert response.status_code == 400
+    assert "is_open" in response.data["error"]
+    space.refresh_from_db()
+    assert (space.space_is_open, space.space_message) == (False, "keep")
+
+
+def test_the_documented_curl_command_without_a_content_type_is_refused_with_a_hint(
+    as_admin, space
+):
+    """Used to do nothing and answer 200.
 
     ``curl -d '{"is_open": true, ...}'`` posts as
-    ``application/x-www-form-urlencoded`` unless told otherwise, so DRF reads
+    ``application/x-www-form-urlencoded`` unless told otherwise, so DRF read
     the JSON text as one odd form key. None of ``is_open``, ``message`` or
-    ``sensors`` is present, and the view treats that as an update of nothing:
-    200, and no change. Whoever follows the documentation gets a space that
-    stays closed.
+    ``sensors`` was present, the view took that for an update of nothing, and
+    whoever followed the documentation got a space that stayed closed. It is a
+    400 that says what to send now, and the documentation names the header.
     """
     response = as_admin().post(
         UPDATE,
@@ -618,138 +697,341 @@ def test_the_documented_curl_command_does_nothing_and_answers_200(as_admin, spac
         content_type="application/x-www-form-urlencoded",
     )
 
-    assert response.status_code == 200
+    assert response.status_code == 400
+    assert "Content-Type: application/json" in response.data["error"]
     space.refresh_from_db()
     assert (space.space_is_open, space.space_message) == (False, None)
 
 
-def test_updating_without_a_spaceapi_row_is_a_500(as_admin, set_config):
+def test_the_curl_command_works_with_the_content_type_the_docs_now_give(
+    as_admin, space
+):
+    response = as_admin().post(
+        UPDATE,
+        data='{"is_open": true, "message": "Open Night TONIGHT!"}',
+        content_type="application/json",
+    )
+
+    assert response.status_code == 200
+    space.refresh_from_db()
+    assert (space.space_is_open, space.space_message) == (True, "Open Night TONIGHT!")
+
+
+@pytest.mark.parametrize("body", [{}, {"unrelated": 1}, []])
+def test_an_update_that_names_nothing_to_update_is_a_400(as_admin, space, body):
+    assert as_admin().post(UPDATE, body, format="json").status_code == 400
+
+
+@pytest.mark.parametrize("message", [5, ["a"], {"a": 1}, "x" * 256])
+def test_a_message_that_is_not_text_or_is_too_long_is_a_400(as_admin, space, message):
+    response = as_admin().post(UPDATE, {"message": message}, format="json")
+
+    assert response.status_code == 400
+    space.refresh_from_db()
+    assert space.space_message is None
+
+
+def test_a_message_can_be_cleared_with_null(as_admin, space):
+    space.space_message = "Open night"
+    space.save()
+
+    as_admin().post(UPDATE, {"message": None}, format="json")
+
+    space.refresh_from_db()
+    assert space.space_message is None
+
+
+def test_updating_on_a_fresh_install_creates_the_row(as_admin, set_config):
     from api_spacedirectory.models import SpaceAPI
 
-    with pytest.raises(SpaceAPI.DoesNotExist):
-        as_admin().post(UPDATE, {"message": "x"}, format="json")
+    response = as_admin().post(UPDATE, {"message": "hello"}, format="json")
+
+    assert response.status_code == 200
+    assert SpaceAPI.objects.get().space_message == "hello"
 
 
-@pytest.mark.parametrize("missing", ["location", "description", "type"])
-def test_a_new_sensor_must_send_location_description_and_type(as_admin, space, missing):
-    """DEFECT, pinned: required in the code, optional in the model and the docs.
+@pytest.mark.parametrize("omitted", ["location", "description"])
+def test_a_new_sensor_needs_only_a_name_and_a_type(
+    api_client, as_admin, space, omitted
+):
+    """Used to be a KeyError: required by the code, optional in the model and docs.
 
-    ``SpaceAPISensor.location`` and ``.description`` are nullable, and the
-    documentation never says a sensor needs either. The create path reads
-    ``sensor["location"]`` and ``sensor["description"]`` regardless, so a
-    first report without them is a ``KeyError`` -- a 500 -- and nothing is
-    stored.
+    ``SpaceAPISensor.location`` and ``.description`` are nullable and the
+    documentation never says a sensor needs either, but the create path read
+    ``sensor["location"]`` and ``sensor["description"]`` regardless, so a first
+    report without them was a 500 and stored nothing.
     """
     payload = temperature()
-    del payload[missing]
+    del payload[omitted]
 
-    with pytest.raises(KeyError):
-        as_admin().post(UPDATE, {"sensors": [payload]}, format="json")
+    response = as_admin().post(UPDATE, {"sensors": [payload]}, format="json")
 
+    assert response.status_code == 200
+    assert getattr(sensors_named("test_sensor").get(), omitted) is None
+    api_client.force_authenticate(user=None)
+    (published,) = document(api_client)["sensors"]["temperature"]
+    # The public document shows a missing description as "", a missing
+    # location as null.
+    assert published[omitted] == ("" if omitted == "description" else None)
+
+
+def test_a_new_sensor_without_a_type_is_a_400(as_admin, space):
+    payload = temperature()
+    del payload["type"]
+
+    response = as_admin().post(UPDATE, {"sensors": [payload]}, format="json")
+
+    assert response.status_code == 400
+    assert "type" in response.data["error"]
     assert not sensors_named("test_sensor").exists()
 
 
-def test_a_sensor_type_outside_the_declared_choices_is_stored(as_admin, space):
-    """DEFECT, pinned: choices are not enforced, and the document trusts them.
+@pytest.mark.parametrize("name", [None, "", "   ", 5, ["a"]])
+def test_a_sensor_without_a_usable_name_is_a_400(as_admin, space, name):
+    from api_spacedirectory.models import SpaceAPISensor
 
-    The type becomes a key in the public document's ``sensors`` object, which
-    SpaceAPI defines a fixed vocabulary for. "banana" is published as is.
+    response = as_admin().post(
+        UPDATE, {"sensors": [temperature(name=name)]}, format="json"
+    )
+
+    assert response.status_code == 400
+    assert not SpaceAPISensor.objects.exists()
+
+
+def test_a_sensor_type_outside_the_declared_choices_is_a_400(as_admin, space):
+    """Used to be stored, then published as a key in the public document.
+
+    SpaceAPI defines a fixed vocabulary for ``sensors``; "banana" went out as
+    is, for new sensors and for a type change on an existing one alike.
     """
-    as_admin().post(UPDATE, {"sensors": [temperature(type="banana")]}, format="json")
+    make_sensor(name="bench")
 
-    assert sensors_named("test_sensor").get().sensor_type == "banana"
+    new = as_admin().post(
+        UPDATE, {"sensors": [temperature(type="banana")]}, format="json"
+    )
+    changed = as_admin().post(
+        UPDATE, {"sensors": [{"name": "bench", "type": "banana"}]}, format="json"
+    )
+
+    assert (new.status_code, changed.status_code) == (400, 400)
+    assert not sensors_named("test_sensor").exists()
+    assert sensors_named("bench").get().sensor_type == "temperature"
 
 
-def test_a_sensors_value_that_is_not_a_number_is_a_500_that_looks_like_a_missing_field(
-    as_admin, space
+@pytest.mark.parametrize(
+    "sent, stored",
+    [
+        (21.3, "21.300"),
+        (0.1, "0.100"),
+        ("19.12345", "19.123"),
+        (7, "7.000"),
+        ("9999999.999", "9999999.999"),
+    ],
+)
+def test_readings_are_stored_to_three_decimal_places(as_admin, space, sent, stored):
+    """Guards the obvious fix going wrong: ``full_clean()`` rejects a plain 21.3
+    (Django makes a ten-digit Decimal of the float and then counts its places),
+    though ``save()`` has always rounded it. Real sensors send such readings."""
+    response = as_admin().post(
+        UPDATE, {"sensors": [temperature(value=sent)]}, format="json"
+    )
+
+    assert response.status_code == 200
+    assert str(sensors_named("test_sensor").get().value) == stored
+
+
+def test_a_reading_can_be_cleared_with_null(as_admin, space):
+    make_sensor(name="test_sensor", value=10)
+
+    as_admin().post(
+        UPDATE, {"sensors": [{"name": "test_sensor", "value": None}]}, format="json"
+    )
+
+    assert sensors_named("test_sensor").get().value is None
+
+
+@pytest.mark.parametrize(
+    "value", ["warm", "NaN", "Infinity", 10**7, [], {"a": 1}, True]
+)
+def test_a_reading_that_is_not_a_usable_number_is_a_400_and_changes_nothing(
+    as_admin, space, value
 ):
-    """DEFECT, pinned: errors are used as control flow.
+    """Used to be a 500 that blamed the wrong field.
 
-    The update runs inside ``try: ... except Exception:`` and the handler is
-    the *create* path. A bad value on an existing sensor fails at ``save()``,
-    the handler tries to create a second sensor, and reports that
-    ``sensor["location"]`` is missing -- which is not what was wrong. The
-    stored sensor is untouched.
+    The update ran inside ``try: ... except Exception:`` and the handler was
+    the *create* path. A bad value on an existing sensor failed at ``save()``,
+    the handler tried to create a second sensor, and reported that
+    ``sensor["location"]`` was missing -- which was not what was wrong.
     """
     make_sensor(name="test_sensor", value=10)
 
-    with pytest.raises(KeyError):
-        as_admin().post(
-            UPDATE,
-            {"sensors": [{"name": "test_sensor", "value": "warm"}]},
-            format="json",
-        )
+    response = as_admin().post(
+        UPDATE, {"sensors": [{"name": "test_sensor", "value": value}]}, format="json"
+    )
 
-    as_committed()
+    assert response.status_code == 400
+    assert "test_sensor value" in response.data["error"]
     assert float(sensors_named("test_sensor").get().value) == 10
 
 
-@pytest.mark.django_db(transaction=True)
-def test_a_bad_property_on_an_existing_sensor_creates_a_duplicate_sensor(
+def test_a_bad_property_on_an_existing_sensor_is_a_400_and_duplicates_nothing(
     as_admin, space
 ):
-    """DEFECT, pinned: the same handler, with a visible casualty.
+    """Used to create a duplicate sensor before raising.
 
-    A property value that does not validate fails inside the update path. The
-    inner bare ``except:`` tries to create it as new and fails again, and the
-    outer ``except Exception`` falls back to creating the whole *sensor*. When
-    the request carries ``location`` and ``description`` that succeeds, so the
-    sensor now exists twice under one name before the final error is raised.
-
-    Runs outside the usual test transaction: inside it, the failed ``save()``
-    would poison the fallback's queries, which production's autocommit does not.
+    A property value that did not validate failed inside the update path. The
+    inner bare ``except:`` tried to create it as new and failed again, and the
+    outer ``except Exception`` fell back to creating the whole *sensor*. With
+    ``location`` and ``description`` in the request that succeeded, so the
+    sensor existed twice under one name before the final error.
     """
+    from api_spacedirectory.models import SpaceAPISensorProperties
+
     anemometer = make_sensor(sensor_type="wind", name="roof", value=None)
     make_property(anemometer, "speed", 1, "m/s")
 
-    with pytest.raises(ValidationError):
-        as_admin().post(
-            UPDATE,
-            {
-                "sensors": [
-                    wind(
-                        [{"name": "speed", "value": "fast", "unit": "m/s"}],
-                        name="roof",
-                    )
-                ]
-            },
-            format="json",
-        )
+    response = as_admin().post(
+        UPDATE,
+        {
+            "sensors": [
+                wind([{"name": "speed", "value": "fast", "unit": "m/s"}], name="roof")
+            ]
+        },
+        format="json",
+    )
 
-    as_committed()
-    assert sensors_named("roof").count() == 2
+    assert response.status_code == 400
+    assert sensors_named("roof").count() == 1
+    assert float(SpaceAPISensorProperties.objects.get().value) == 1
 
 
-def test_the_documented_property_example_fails_and_every_retry_adds_a_sensor(
+def test_the_old_documentation_property_example_is_a_400_and_retries_add_nothing(
     as_admin, space
 ):
-    """DEFECT, pinned: the docs write ``speed`` where the code reads ``value``.
+    """Used to grow the table by one sensor per retry.
 
-    The "Sensors *with* properties" example gives each property a key named
-    after itself (``"speed": 5.0``). The code requires ``"value"``, so the
-    request is a ``KeyError``. By then the sensor has been saved, so the first
-    attempt leaves a sensor with no properties; the retry finds it, fails on
-    the same property, and the exception handler creates another sensor with
-    the same name. A device that keeps retrying a failing request grows the
-    table by one sensor per attempt.
+    The docs gave each property a key named after itself (``"speed": 5.0``)
+    where the code reads ``"value"``. The sensor was saved, the property
+    raised, and every retry found the sensor, failed the same way, and the
+    exception handler created another with the same name. The request is
+    refused whole now -- nothing is stored, so a device that keeps retrying
+    changes nothing -- and the documentation says ``value``.
     """
-    payload = {
-        "sensors": [wind([{"name": "gust", "unit": "m/s", "speed": 5.0}])],
+    payload = {"sensors": [wind([{"name": "gust", "unit": "m/s", "speed": 5.0}])]}
+
+    for _attempt in range(3):
+        response = as_admin().post(UPDATE, payload, format="json")
+        assert response.status_code == 400
+        assert "value" in response.data["error"]
+
+    assert not sensors_named("wind_sensor_01").exists()
+
+
+@pytest.mark.parametrize(
+    "properties, mentions",
+    [
+        ([{"name": "gust", "value": 1}], "unit"),
+        ([{"name": "gust", "unit": "m/s"}], "value"),
+        ([{"value": 1, "unit": "m/s"}], "name"),
+        (["gust"], "name"),
+        ({"name": "gust"}, "list"),
+    ],
+)
+def test_a_malformed_property_is_a_400_that_says_what_is_wrong(
+    as_admin, space, properties, mentions
+):
+    response = as_admin().post(UPDATE, {"sensors": [wind(properties)]}, format="json")
+
+    assert response.status_code == 400
+    assert mentions in response.data["error"]
+    assert not sensors_named("wind_sensor_01").exists()
+
+
+@pytest.mark.parametrize(
+    "sensors", [{"name": "test_sensor"}, "test_sensor", 5, [None], ["name"], [[1]]]
+)
+def test_sensors_that_are_not_a_list_of_objects_is_a_400(as_admin, space, sensors):
+    """Used to be a TypeError: a dict was iterated as its keys."""
+    response = as_admin().post(UPDATE, {"sensors": sensors}, format="json")
+
+    assert response.status_code == 400
+
+
+def test_a_request_that_fails_half_way_changes_nothing(as_admin, space):
+    """The whole update is one transaction: state, message and every sensor."""
+    make_sensor(name="bench", value=10)
+
+    response = as_admin().post(
+        UPDATE,
+        {
+            "is_open": True,
+            "message": "Open",
+            "sensors": [
+                {"name": "bench", "value": 99},
+                {"name": "fresh", "type": "banana"},
+            ],
+        },
+        format="json",
+    )
+
+    assert response.status_code == 400
+    space.refresh_from_db()
+    assert (space.space_is_open, space.space_message) == (False, None)
+    assert float(sensors_named("bench").get().value) == 10
+    assert not sensors_named("fresh").exists()
+
+
+def test_the_documentations_full_example_applies(as_admin, api_client, space):
+    """The docs' last example, as corrected: unique names, ``value`` keys."""
+    body = {
+        "is_open": True,
+        "message": "Soldering workshop tonight - 8pm to 10pm",
+        "sensors": [
+            temperature(),
+            wind(
+                [
+                    {"name": "speed", "unit": "m/s", "value": 5.0},
+                    {"name": "gust", "unit": "m/s", "value": 9.0},
+                ]
+            ),
+        ],
     }
 
-    counts = []
-    for _attempt in range(3):
-        with pytest.raises(KeyError):
-            as_admin().post(UPDATE, payload, format="json")
-        counts.append(sensors_named("wind_sensor_01").count())
+    assert as_admin().post(UPDATE, body, format="json").status_code == 200
+    api_client.force_authenticate(user=None)
 
-    assert counts == [1, 2, 3]
+    published = document(api_client)
+    assert published["state"]["open"] is True
+    assert published["sensors"]["temperature"][0]["value"] == 21.0
+    assert published["sensors"]["wind"][0]["properties"] == {
+        "speed": {"value": 5.0, "unit": "m/s"},
+        "gust": {"value": 9.0, "unit": "m/s"},
+    }
 
 
-def test_sensors_that_are_not_a_list_of_objects_is_a_500(as_admin, space):
-    """DEFECT, pinned: no shape check; a dict is iterated as its keys."""
-    with pytest.raises(TypeError):
-        as_admin().post(UPDATE, {"sensors": {"name": "test_sensor"}}, format="json")
+def test_every_json_example_in_the_documentation_is_accepted(as_admin, space):
+    """The docs are the only specification of the update format.
+
+    Every ``json`` block in ``docs/SPACEDIRECTORY.md`` is posted as written.
+    Before this, three of the five were wrong: one was not valid JSON, one gave
+    two different sensors the same name, and the property examples used a key
+    the code does not read.
+    """
+    import re
+    from pathlib import Path
+
+    docs = Path(__file__).resolve().parents[2] / "docs" / "SPACEDIRECTORY.md"
+    if not docs.exists():  # the Docker image does not ship docs/
+        pytest.skip("docs/SPACEDIRECTORY.md is not available")
+
+    examples = re.findall(r"```json\n(.*?)```", docs.read_text(), re.S)
+    assert len(examples) >= 5
+
+    for example in examples:
+        response = as_admin().post(
+            UPDATE, data=example, content_type="application/json"
+        )
+        assert response.status_code == 200, example
 
 
 # --------------------------------------------------------------------------

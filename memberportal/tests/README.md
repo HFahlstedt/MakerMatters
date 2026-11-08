@@ -57,6 +57,14 @@ rather than a patch, or because nobody has asked yet:
   renaming them breaks whatever scrapes them. The shipped `METRICS_INTERVAL`
   default logs its own "NOT recommended" warning.
 
+- The space directory, in `test_spacedirectory_api.py`. A sensor is identified by
+  its name alone, so two sensors cannot share one. `SPACE_DIRECTORY_OPEN` and
+  `SPACE_DIRECTORY_MESSAGE` are offered in the Constance admin but never read:
+  the open state and message live on the `SpaceAPI` row. Removing them changes
+  the Constance golden file, so whether to is a decision. The endpoint is
+  public by design, and exposes the active member count and how many people
+  are signed in to the site.
+
 ## Running
 
 ```bash
@@ -95,6 +103,7 @@ opens the log file at import time.
 | `test_member_tools.py` | The five member-facing `/api/tools/` endpoints: swipe feed, last-seen board, upcoming meetings, member directory and the report-an-issue form. |
 | `test_memberbucks_api.py` | The member wallet: balance, transaction history, card top-up, portal payments, and the admin balance list. The only member-facing endpoints that move money. |
 | `test_meeting_api.py` | Admin meeting scheduling and member proxy votes — governance records that decide whose votes a member carries into a general meeting. |
+| `test_spacedirectory_api.py` | The SpaceAPI directory: the public open/closed document, and the endpoint a door controller or weather station uses to update state and sensors. Includes a test that posts every example in `docs/SPACEDIRECTORY.md`. |
 | `test_metrics_api.py` | The metrics pipeline end to end: the six `calculate_*` functions, the stats page, the Prometheus gauge update, and the Celery task that drives it. |
 
 ## Conventions
