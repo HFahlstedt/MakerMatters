@@ -107,11 +107,17 @@ class UpdatePromMetrics(APIView):
                 Metric.MetricName.MEMBERBUCKS_BALANCE_TOTAL,
                 Metric.MetricName.MEMBERBUCKS_TRANSACTIONS_TOTAL,
             ]:
-                prom_metric = getattr(api_metrics.metrics, metric.name)
+                prom_metric = getattr(api_metrics, metric.name, None)
 
                 if not prom_metric:
                     logger.error(f"Prometheus metric {metric.name} not found.")
                     continue
+
+                # The newest row is the whole truth: a label that is not in it
+                # (the last "noob" was promoted) must stop being reported, and
+                # set() alone never removes one. The balance has no labels.
+                if metric.name != Metric.MetricName.MEMBERBUCKS_BALANCE_TOTAL:
+                    prom_metric.clear()
 
                 for state in metric.data:
                     if metric.name in [
@@ -124,7 +130,9 @@ class UpdatePromMetrics(APIView):
 
                     elif metric.name in [Metric.MetricName.MEMBERBUCKS_BALANCE_TOTAL]:
                         logger.debug(f"Setting {metric.name} to {metric.data[state]}")
-                        prom_metric.set(metric.data[state])
+                        # Rows stored before the balance learned to fall back to
+                        # zero hold null when there was nothing to sum.
+                        prom_metric.set(metric.data[state] or 0)
 
                     else:
                         logger.debug(

@@ -7,6 +7,9 @@ import logging
 
 logger = logging.getLogger("celery:api_metrics")
 
+# Seconds. Without one a hung web process would hold the worker indefinitely.
+UPDATE_PROM_METRICS_TIMEOUT = 30
+
 
 @app.on_after_finalize.connect
 def setup_periodic_tasks(sender, **kwargs):
@@ -41,7 +44,14 @@ def calculate_metrics():
     calculate_memberbucks_transactions()
 
     try:
-        requests.post(config.SITE_URL + "/api/update-prom-metrics/")
+        # The gauges live in the web process, so the worker has to ask it.
+        # An error reply is a failure too: requests only raises for the
+        # connection, and the gauges silently stop moving if it goes unseen.
+        response = requests.post(
+            config.SITE_URL.rstrip("/") + "/api/update-prom-metrics/",
+            timeout=UPDATE_PROM_METRICS_TIMEOUT,
+        )
+        response.raise_for_status()
 
     except Exception as e:
         logger.error(f"Failed to update Prometheus metrics: {e}")

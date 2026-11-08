@@ -13,10 +13,9 @@ Four pieces, wired in a line:
 4. ``Statistics`` serves the stored rows to the portal's stats page, one per
    day.
 
-The last two links do not work today: ``UpdatePromMetrics`` raises on every
-request once any ``Metric`` row exists, and the task that calls it never looks
-at the answer. Tests that need to look past that failure patch the broken
-lookup and say so.
+The last two links did not work until recently: ``UpdatePromMetrics`` raised on
+every request once any ``Metric`` row existed, and the task that calls it never
+looked at the answer. The tests that pinned those say what the code used to do.
 """
 
 from datetime import timedelta
@@ -242,19 +241,18 @@ def test_a_balance_of_1000_or_more_is_left_out_of_the_total_without_a_word(
     assert latest("memberbucks_balance_total").data == {"value": 20.0}
 
 
-def test_the_memberbucks_balance_is_null_when_there_is_nothing_to_sum():
-    """DEFECT, pinned: the other five metrics fall back to a zero row.
+def test_the_memberbucks_balance_is_zero_when_there_is_nothing_to_sum():
+    """Used to be ``{"value": null}``; the other five metrics fall back to a row.
 
-    ``aggregate(Sum(...))`` over no rows is ``None``, and it is stored as
-    ``{"value": null}``. A site with no members, or none under the $1000
-    cutoff, gets a null where the stats page and the Prometheus gauge both
-    expect a number.
+    ``aggregate(Sum(...))`` over no rows is ``None``, and it was stored as is.
+    A site with no members, or none under the $1000 cutoff, got a null where
+    the stats page and the Prometheus gauge both expect a number.
     """
     import api_metrics.metrics as m
 
     m.calculate_memberbucks_balance()
 
-    assert latest("memberbucks_balance_total").data == {"value": None}
+    assert latest("memberbucks_balance_total").data == {"value": 0.0}
 
 
 # --------------------------------------------------------------------------
@@ -306,7 +304,7 @@ def test_a_single_transaction_of_1000_or_more_is_left_out_of_its_total(make_memb
     assert latest("memberbucks_transactions_total").data == [
         {"type": "stripe", "total": 20.0}
     ]
-    assert latest("memberbucks_balance_total").data == {"value": None}
+    assert latest("memberbucks_balance_total").data == {"value": 0.0}
 
 
 def test_transactions_with_no_rows_store_a_stripe_zero_row():
@@ -538,20 +536,6 @@ def test_an_integration_api_key_can_recalculate_too(with_api_key):
 # --------------------------------------------------------------------------
 
 
-@pytest.fixture
-def prom_lookup_working(monkeypatch):
-    """Make ``getattr(api_metrics.metrics, name)`` find the gauges.
-
-    In ``views.py`` the module is imported as ``api_metrics``, so
-    ``api_metrics.metrics`` asks it for an attribute called ``metrics`` that
-    it does not have. Pointing that attribute back at the module is what the
-    line plainly meant, and lets the tests below describe everything past it.
-    """
-    import api_metrics.metrics as m
-
-    monkeypatch.setattr(m, "metrics", m, raising=False)
-
-
 def test_update_prom_metrics_needs_no_login_and_no_key(api_client):
     """Pinned as behaviour: ``AllowAny``, deliberately -- the Celery task that
     calls it sends no credentials. Anyone who can reach the site can make it
@@ -561,28 +545,23 @@ def test_update_prom_metrics_needs_no_login_and_no_key(api_client):
     assert api_client.get("/api/update-prom-metrics/").status_code == 405
 
 
-def test_update_prom_metrics_raises_as_soon_as_any_metric_exists():
-    """DEFECT, pinned: the gauges can never be updated.
+def test_update_prom_metrics_answers_200_when_a_metric_exists(api_client):
+    """Used to raise, so the gauges could never be updated.
 
     ``views.py`` does ``import api_metrics.metrics as api_metrics`` and then
-    ``getattr(api_metrics.metrics, metric.name)``. That is the module
-    ``api_metrics.metrics`` looking for a ``metrics`` attribute inside itself,
-    so every request that finds a stored metric is an AttributeError and a 500.
-    With an empty table there is nothing to look up, which is why the test
-    above passes and why this has not been noticed.
+    asked for ``api_metrics.metrics`` -- the module looking for a ``metrics``
+    attribute inside itself -- so every request that found a stored metric was
+    an AttributeError and a 500. With an empty table there was nothing to look
+    up, which is why an empty install looked healthy.
     """
-    from rest_framework.test import APIClient
-
     make_metric("member_count_total", [{"state": "active", "total": 3}])
 
-    with pytest.raises(AttributeError, match="has no attribute 'metrics'"):
-        APIClient().post("/api/update-prom-metrics/")
+    assert api_client.post("/api/update-prom-metrics/").status_code == 200
+    assert gauge("mm_member_count_total", state="active") == 3
 
 
-def test_update_prom_metrics_copies_the_stored_rows_into_the_gauges(
-    api_client, prom_lookup_working
-):
-    """Past the broken lookup (patched), each row lands on its own gauge."""
+def test_update_prom_metrics_copies_the_stored_rows_into_the_gauges(api_client):
+    """Each row lands on its own gauge."""
     make_metric("member_count_total", [{"state": "active", "total": 7}])
     make_metric("member_count_6_months_total", [{"state": "active", "total": 5}])
     make_metric("member_count_12_months_total", [{"state": "inactive", "total": 2}])
@@ -605,9 +584,7 @@ def test_update_prom_metrics_copies_the_stored_rows_into_the_gauges(
     assert gauge("mm_memberbucks_transactions_total", type="card") == -6.0
 
 
-def test_update_prom_metrics_uses_only_the_newest_row_of_each_kind(
-    api_client, prom_lookup_working
-):
+def test_update_prom_metrics_uses_only_the_newest_row_of_each_kind(api_client):
     now = timezone.now()
     make_metric(
         "member_count_total",
@@ -621,15 +598,13 @@ def test_update_prom_metrics_uses_only_the_newest_row_of_each_kind(
     assert gauge("mm_member_count_total", state="active") == 9
 
 
-def test_a_state_that_disappears_keeps_its_last_value_on_the_gauge(
-    api_client, make_member, prom_lookup_working
-):
-    """DEFECT, pinned (behind the lookup defect above): gauges are never cleared.
+def test_a_state_that_disappears_stops_being_reported(api_client, make_member):
+    """Used to keep its last value: gauges were never cleared.
 
-    Each run does ``labels(state=...).set(total)`` for the states present and
-    nothing for the states that are not. When the last "noob" is promoted, the
-    next stored row has no "noob" entry, and the gauge goes on reporting the
-    old count until the web process restarts.
+    Each run did ``labels(state=...).set(total)`` for the states present and
+    nothing for the states that were not. When the last "noob" was promoted,
+    the next stored row had no "noob" entry, and the gauge went on reporting
+    the old count until the web process restarted.
     """
     import api_metrics.metrics as m
 
@@ -646,23 +621,43 @@ def test_a_state_that_disappears_keeps_its_last_value_on_the_gauge(
     api_client.post("/api/update-prom-metrics/")
 
     assert gauge("mm_member_count_total", state="active") == 1
-    assert gauge("mm_member_count_total", state="noob") == 1  # should be gone
+    assert gauge("mm_member_count_total", state="noob") is None
 
 
-def test_a_null_memberbucks_balance_makes_the_gauge_update_raise(
-    api_client, prom_lookup_working
-):
-    """DEFECT, pinned (behind the lookup defect above): ``set(None)``.
+def test_a_row_stored_with_a_null_balance_is_read_as_zero(api_client):
+    """Used to make the update raise: ``Gauge.set`` calls ``float(None)``.
 
-    ``calculate_memberbucks_balance`` stores ``{"value": null}`` when there is
-    nothing to sum, and the gauge is set from it unchecked. ``Gauge.set``
-    calls ``float(None)``. The metrics that sort after the balance in the loop
-    are never reached.
+    Rows written before the balance learned to fall back to zero still hold
+    ``{"value": null}`` and are the newest row until the next run. The balance
+    sorts before the transactions in the loop, so the ones after it were never
+    reached either.
     """
     make_metric("memberbucks_balance_total", {"value": None})
+    make_metric("memberbucks_transactions_total", [{"type": "card", "total": 2.5}])
 
-    with pytest.raises(TypeError):
-        api_client.post("/api/update-prom-metrics/")
+    response = api_client.post("/api/update-prom-metrics/")
+
+    assert response.status_code == 200
+    assert gauge("mm_memberbucks_balance_total") == 0
+    assert gauge("mm_memberbucks_transactions_total", type="card") == 2.5
+
+
+def test_a_metric_with_no_gauge_is_logged_and_skipped(api_client, monkeypatch):
+    """The ``not prom_metric`` branch was unreachable while the lookup raised."""
+    import api_metrics.metrics as m
+    import api_metrics.views as views
+
+    log = RecordingLogger()
+    monkeypatch.setattr(views, "logger", log)
+    monkeypatch.delattr(m, "member_count_total")
+    make_metric("member_count_total", [{"state": "active", "total": 3}])
+    make_metric("subscription_count_total", [{"state": "active", "total": 4}])
+
+    response = api_client.post("/api/update-prom-metrics/")
+
+    assert response.status_code == 200
+    assert log.at("error") == ["Prometheus metric member_count_total not found."]
+    assert gauge("mm_subscription_count_total", state="active") == 4
 
 
 # --------------------------------------------------------------------------
@@ -759,6 +754,9 @@ def post_to_site(monkeypatch):
     class Reply:
         status_code = 200
 
+        def raise_for_status(self):
+            pass
+
     def _post(*args, **kwargs):
         calls.append((args, kwargs))
         return Reply()
@@ -778,17 +776,17 @@ def test_calculate_metrics_stores_all_six_then_pokes_the_web_process(
     tasks.calculate_metrics()
 
     assert sorted(Metric.objects.values_list("name", flat=True)) == sorted(ALL_METRICS)
-    # No credentials and no timeout: the call is a bare POST and waits as long
-    # as the server takes.
+    # No credentials -- the endpoint is open -- but a timeout, so a hung web
+    # process cannot hold the worker forever.
     assert post_to_site == [
-        (("https://portal.example.test/api/update-prom-metrics/",), {})
+        (("https://portal.example.test/api/update-prom-metrics/",), {"timeout": 30})
     ]
 
 
-def test_a_trailing_slash_on_site_url_gives_a_double_slash(
+def test_a_trailing_slash_on_site_url_is_not_doubled(
     set_config, post_to_site, task_log
 ):
-    """Pinned as behaviour: the URL is built by concatenation, not joined."""
+    """Used to give ``//api/...``: the URL was concatenated, not joined."""
     import api_metrics.tasks as tasks
 
     set_config(SITE_URL="https://portal.example.test/")
@@ -796,7 +794,7 @@ def test_a_trailing_slash_on_site_url_gives_a_double_slash(
     tasks.calculate_metrics()
 
     assert post_to_site[0][0] == (
-        "https://portal.example.test//api/update-prom-metrics/",
+        "https://portal.example.test/api/update-prom-metrics/",
     )
 
 
@@ -818,15 +816,15 @@ def test_a_connection_failure_is_logged_and_the_rows_are_kept(
     assert "web process is down" in task_log.at("error")[0]
 
 
-def test_an_error_response_from_the_web_process_is_not_noticed(
+def test_an_error_response_from_the_web_process_is_logged(
     monkeypatch, set_config, task_log
 ):
-    """DEFECT, pinned: the reply is never looked at.
+    """Used to go unnoticed: the reply was never looked at.
 
-    Only an exception from ``requests.post`` is caught. A 500 from
-    ``/api/update-prom-metrics/`` -- which is what it returns today -- is a
-    normal return, so the task finishes without a word in the log and the
-    gauges quietly never move.
+    Only an exception from ``requests.post`` was caught. A 500 from
+    ``/api/update-prom-metrics/`` -- which is what it returned for as long as
+    the lookup was broken -- is a normal return, so the task finished without
+    a word in the log and the gauges quietly never moved.
     """
     import api_metrics.tasks as tasks
 
@@ -840,4 +838,5 @@ def test_an_error_response_from_the_web_process_is_not_noticed(
 
     tasks.calculate_metrics()
 
-    assert task_log.at("error") == []
+    assert len(task_log.at("error")) == 1
+    assert "500 Server Error" in task_log.at("error")[0]

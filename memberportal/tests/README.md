@@ -41,15 +41,21 @@ rather than a patch, or because nobody has asked yet:
   of 1,000 or more, while the per-member list beside it does not. The threshold
   may be deliberate — to leave out test or treasurer accounts — so whether to
   remove it, document it or make it configurable is a decision.
-- Proxy votes, pinned in `test_meeting_api.py`. Appointing a proxy deletes the
-  existing one *before* checking the new request, so an incomplete
-  resubmission — or one naming an unknown member, which then 500s — destroys a
-  valid appointment; replacing a proxy never tells the member who was holding
-  it; deleting a meeting discards all its proxies without notifying anyone; and
-  a proxy is accepted for a past meeting, for the member themselves, or held by
-  someone who is not active, because the form enforces those limits and the
-  endpoint does not. Whether one member may hold unlimited proxies is a
-  constitutional question, not a bug.
+- Proxy votes, in `test_meeting_api.py`. Whether one member may hold unlimited
+  proxies is a constitutional question, not a bug. Also still as-is: editing a
+  meeting ignores its type (`MeetingForm.vue` disables it by design), a past
+  meeting's date can still be moved, attendees are written nowhere, and a
+  holder cannot list the proxies they hold. `PUT`/`DELETE` of an unknown
+  meeting id is an unchecked `.get()`.
+- The metrics pipeline, in `test_metrics_api.py`. Wallets of $1000 or more and
+  single transactions of $1000 or more are left out of the memberbucks totals
+  by an undocumented cutoff, as in the balance list above. The stats page
+  groups by UTC day while the portal runs in `TIME_ZONE`. With the stats page
+  off, `user.is_admin` unlocks the data where the rest of the API uses
+  `is_staff`. `/api/update-prom-metrics/` is open to anyone because the Celery
+  task sends no credentials. Two of the six gauges lack the `mm_` prefix, and
+  renaming them breaks whatever scrapes them. The shipped `METRICS_INTERVAL`
+  default logs its own "NOT recommended" warning.
 
 ## Running
 
@@ -89,6 +95,7 @@ opens the log file at import time.
 | `test_member_tools.py` | The five member-facing `/api/tools/` endpoints: swipe feed, last-seen board, upcoming meetings, member directory and the report-an-issue form. |
 | `test_memberbucks_api.py` | The member wallet: balance, transaction history, card top-up, portal payments, and the admin balance list. The only member-facing endpoints that move money. |
 | `test_meeting_api.py` | Admin meeting scheduling and member proxy votes — governance records that decide whose votes a member carries into a general meeting. |
+| `test_metrics_api.py` | The metrics pipeline end to end: the six `calculate_*` functions, the stats page, the Prometheus gauge update, and the Celery task that drives it. |
 
 ## Conventions
 
