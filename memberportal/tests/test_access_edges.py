@@ -73,27 +73,28 @@ async def test_a_device_with_no_serial_number_is_not_sent_commands(make_door):
 
 @pytest.mark.protocol
 @pytest.mark.django_db(transaction=True)
-async def test_a_sync_pushed_to_an_unauthenticated_device_raises_in_its_consumer(
-    make_door,
+async def test_a_sync_pushed_to_an_unauthenticated_device_is_ignored(
+    make_door, device_api_key
 ):
-    """DEFECT, pinned: ``check_authorised`` raises instead of declining.
+    """Used to raise in the consumer and drop the socket.
 
     A connected device that has not yet sent a valid key is already in its
     channel group. An administrator's "sync" -- or the sync a sign-in or a
-    membership change fans out to every affected door -- reaches it, and
-    ``sync_users`` answers with ``RuntimeError``, which unwinds the consumer
-    and drops the socket. A broadcast that touches a half-connected device
-    therefore disconnects it, where ignoring the event would do.
+    membership change fans out to every affected door -- reached it, and
+    ``check_authorised`` raised ``RuntimeError``, which unwound the consumer
+    and dropped the connection. The event is now declined and logged, and the
+    device can go on to authenticate.
     """
-    from access.models import Doors
-
     door = await ws.aget(make_door)(serial="push-unauth")
     comm = await ws.open_device("door", "push-unauth")
 
-    with pytest.raises(RuntimeError, match="not authorised"):
-        await ws.aget(door.sync)()
-        await comm.receive_output(timeout=ws.TIMEOUT)
-        await comm.wait(timeout=ws.TIMEOUT)
+    await ws.aget(door.sync)()
+    assert await comm.receive_nothing(timeout=0.5)
+
+    handshake = await ws.authenticate(comm, device_api_key)
+    assert handshake["ack"] == {"authorised": True}
+    assert "sync" in handshake["by_command"]
+    await comm.disconnect()
 
 
 # --------------------------------------------------------------------------
@@ -120,18 +121,17 @@ def interlock_pair(make_interlock, make_member):
 )
 @pytest.mark.protocol
 @pytest.mark.django_db(transaction=True)
-async def test_naming_a_session_that_does_not_exist_kills_the_connection(
+async def test_naming_a_session_that_does_not_exist_is_a_clean_failure(
     make_interlock, device_api_key, command, session_id
 ):
-    """DEFECT, pinned: ``InterlockLog.objects.get`` is unchecked.
+    """Used to kill the connection: ``InterlockLog.objects.get`` was unchecked.
 
-    A device that retries after a restart, or sends a corrupt id, gets
-    ``{"command": "error"}`` and then the consumer re-raises, which closes the
-    socket. The firmware has to reconnect and re-authenticate for what should
-    have been a ``success: false`` reply, as an already-ended session gets.
+    A device that retries after a restart, or sends a corrupt id, got
+    ``{"command": "error"}`` and the consumer then re-raised, closing the
+    socket, so the firmware had to reconnect and re-authenticate for what
+    should have been a ``success: false`` reply, as an already-ended session
+    gets. It now gets one, and the socket stays open.
     """
-    from django.core.exceptions import ObjectDoesNotExist, ValidationError
-
     await ws.aget(make_interlock)(serial="edge-unknown-session")
     comm, _ = await ws.open_authenticated(
         "interlock", "edge-unknown-session", device_api_key
@@ -139,24 +139,34 @@ async def test_naming_a_session_that_does_not_exist_kills_the_connection(
 
     await comm.send_json_to({"command": command, "session_id": session_id})
 
-    assert await comm.receive_json_from(timeout=ws.TIMEOUT) == {"command": "error"}
-    with pytest.raises((ObjectDoesNotExist, ValidationError)):
-        await comm.wait(timeout=ws.TIMEOUT)
+    assert await comm.receive_json_from(timeout=ws.TIMEOUT) == {
+        "command": command,
+        "success": False,
+        "reason": "session_not_found",
+    }
+    await comm.send_json_to({"command": "ping"})
+    assert await comm.receive_json_from(timeout=ws.TIMEOUT) == {"command": "pong"}
+    await comm.disconnect()
 
 
+@pytest.mark.parametrize("command", ["interlock_session_update", "interlock_session_end"])
 @pytest.mark.protocol
 @pytest.mark.django_db(transaction=True)
-async def test_a_device_can_end_another_interlocks_session(
-    interlock_pair, device_api_key
+async def test_a_device_cannot_touch_another_interlocks_session(
+    interlock_pair, device_api_key, command
 ):
-    """DEFECT, pinned: the session id is not checked against the device.
+    """Used to succeed: the session id was not checked against the device.
 
-    Interlock B ends the session that member started on interlock A, naming it
-    by id. It succeeds, A's session is closed, and the member is billed A's
-    rate. Device keys are global (see ``test_device_connection.py``), so any
-    authenticated device -- or anyone holding the one key -- can end any
-    session in the space, but nothing ties a session to the device it ran on.
+    Interlock B could end the session a member started on interlock A, naming
+    it by id, and the member was billed A's rate. Device keys are global (see
+    ``test_device_connection.py``), so any authenticated device, or anyone
+    holding the one key, could end any session in the space. A session may now
+    only be updated or ended by the interlock it ran on.
     """
+    from datetime import timedelta
+
+    from django.utils import timezone
+
     from access.models import InterlockLog
     from memberbucks.models import MemberBucks
 
@@ -166,12 +176,8 @@ async def test_a_device_can_end_another_interlocks_session(
         {"command": "interlock_session_start", "card_id": "EDGE-TAG"}
     )
     session_id = (await comm_a.receive_json_from(timeout=ws.TIMEOUT))["session_id"]
-    # Backdate so the session is long enough to be charged at all.
+
     def _backdate():
-        from datetime import timedelta
-
-        from django.utils import timezone
-
         InterlockLog.objects.filter(id=session_id).update(
             date_started=timezone.now() - timedelta(seconds=120)
         )
@@ -180,17 +186,24 @@ async def test_a_device_can_end_another_interlocks_session(
 
     comm_b, _ = await ws.open_authenticated("interlock", "edge-int-b", device_api_key)
     await comm_b.send_json_to(
+        {"command": command, "session_id": session_id, "card_id": "EDGE-TAG"}
+    )
+    reply = await comm_b.receive_json_from(timeout=ws.TIMEOUT)
+
+    assert reply == {"command": command, "success": False, "reason": "session_not_found"}
+    session = await ws.aget(InterlockLog.objects.get)(id=session_id)
+    assert session.date_ended is None
+    assert await ws.aget(MemberBucks.objects.filter(user=member.user).count)() == 0
+
+    # The interlock it ran on can still end it, and the member is billed.
+    await comm_a.send_json_to(
         {
             "command": "interlock_session_end",
             "session_id": session_id,
             "card_id": "EDGE-TAG",
         }
     )
-    reply = await comm_b.receive_json_from(timeout=ws.TIMEOUT)
-
-    assert reply == {"command": "interlock_session_end", "success": True}
-    session = await ws.aget(InterlockLog.objects.get)(id=session_id)
-    assert session.date_ended is not None
+    assert (await comm_a.receive_json_from(timeout=ws.TIMEOUT))["success"] is True
     assert await ws.aget(MemberBucks.objects.filter(user=member.user).count)() == 1
     await comm_a.disconnect()
     await comm_b.disconnect()

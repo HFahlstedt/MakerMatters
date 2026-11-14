@@ -31,13 +31,6 @@ rather than a patch, or because nobody has asked yet:
   endpoint reveals whether an address is registered, and kiosk login ignores
   member state. Also the two serializations of one profile
   (`test_the_two_profile_serializations_disagree`), which is an API decision.
-- Device sessions, in `test_access_edges.py`. An interlock session id is not
-  checked against the device that sends it, and device keys are global, so any
-  authenticated device can end (and bill) any session. A session id that does
-  not exist is an unhandled `DoesNotExist` that drops the connection after an
-  `error` packet, where an already-ended session gets `success: false`. A sync
-  pushed to a connected but unauthenticated device raises in its consumer and
-  drops it.
 - The issue reporter, in `test_member_tools.py` and `test_issue_integrations.py`.
   Whether one failing leg should make the whole report a 500, when the others
   delivered and a retry duplicates them, is a decision.

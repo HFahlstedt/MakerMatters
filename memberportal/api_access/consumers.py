@@ -18,7 +18,7 @@ from memberbucks.models import (
 )
 from profile.models import Profile, User
 from constance import config
-from django.core.exceptions import ObjectDoesNotExist
+from django.core.exceptions import ObjectDoesNotExist, ValidationError
 from django.utils import timezone
 
 logger = logging.getLogger("access")
@@ -174,18 +174,25 @@ class AccessDeviceConsumer(JsonWebsocketConsumer):
         )
 
     def check_authorised(self):
+        """Whether data may be pushed to this device.
+
+        Events arrive here from the channel layer for every device in the
+        group, including one that has connected but not yet sent a valid key.
+        Those are declined (and logged) rather than raised: an exception
+        would unwind the consumer and drop the socket of a device that is
+        merely mid-handshake.
+        """
         if self.authorised:
             return True
-        else:
-            logger.warning(
-                f"Device {self.device.serial_number} is not authorised but data was sent to it!"
-            )
-            raise RuntimeError(
-                f"Device {self.device.serial_number} is not authorised but data was sent to it!"
-            )
+
+        logger.warning(
+            f"Device {self.device.serial_number} is not authorised, so data was not sent to it."
+        )
+        return False
 
     def sync_users(self, event=None):
-        self.check_authorised()
+        if not self.check_authorised():
+            return
 
         if self.device.type != "door":
             logger.debug(
@@ -217,7 +224,8 @@ class AccessDeviceConsumer(JsonWebsocketConsumer):
         self.send_json({"command": "unlock"})
 
     def update_device_locked_out(self, event=None):
-        self.check_authorised()
+        if not self.check_authorised():
+            return
 
         # Handles the "update_locked_out" event when it's sent to us.
         logger.info(
@@ -295,7 +303,8 @@ class DoorConsumer(AccessDeviceConsumer):
             return False
 
     def door_bump(self, event=None):
-        self.check_authorised()
+        if not self.check_authorised():
+            return
 
         # Handles the "door_bump" event when it's sent to us.
 
@@ -304,6 +313,19 @@ class DoorConsumer(AccessDeviceConsumer):
 
 
 class InterlockConsumer(AccessDeviceConsumer):
+    def get_own_session(self, session_id):
+        """The session with this id, if it ran on *this* interlock.
+
+        An unknown or malformed id, and one that belongs to another interlock,
+        are all "not found": a device may only update or end its own sessions.
+        """
+        try:
+            return InterlockLog.objects.filter(
+                id=session_id, interlock=self.device
+            ).first()
+        except (ValidationError, ValueError):
+            return None
+
     type = "interlock"
     session = None
 
@@ -368,7 +390,17 @@ class InterlockConsumer(AccessDeviceConsumer):
             session_id = content.get("session_id")
             session_kwh = content.get("session_kwh")
 
-            session = InterlockLog.objects.get(id=session_id)
+            session = self.get_own_session(session_id)
+
+            if session is None:
+                self.send_json(
+                    {
+                        "command": "interlock_session_update",
+                        "success": False,
+                        "reason": "session_not_found",
+                    }
+                )
+                return True
 
             if session.date_ended:
                 self.send_json(
@@ -407,7 +439,17 @@ class InterlockConsumer(AccessDeviceConsumer):
                 Profile.objects.filter(rfid=card_id).select_related("user").first()
             )
             user = profile.user if profile else None
-            session = InterlockLog.objects.get(id=session_id)
+            session = self.get_own_session(session_id)
+
+            if session is None:
+                self.send_json(
+                    {
+                        "command": "interlock_session_end",
+                        "success": False,
+                        "reason": "session_not_found",
+                    }
+                )
+                return True
 
             if session.date_ended:
                 self.send_json(
