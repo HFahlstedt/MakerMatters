@@ -272,6 +272,7 @@ class StripeStub:
         "Subscription.create",
         "Subscription.retrieve",
         "Subscription.modify",
+        "Subscription.cancel",
         "PaymentIntent.create",
         "PaymentIntent.retrieve",
         "Product.create",

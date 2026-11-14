@@ -222,9 +222,12 @@ def test_an_incomplete_subscription_is_reported_to_the_member(
 
     response = as_member(profile).post(f"/api/billing/plans/{plan.id}/signup/")
 
-    assert response.json() == {"success": True, "message": "signup.subscriptionFailed"}
-    # Nothing is recorded when the subscription did not become active.
+    # A failure the frontend can show: ``success: true`` with a message used to
+    # be treated as a success and the message ignored.
+    assert response.json() == {"success": False, "message": "signup.subscriptionFailed"}
+    # Nothing is recorded, and the abandoned subscription is cancelled in Stripe.
     assert Profile.objects.get(pk=profile.pk).membership_plan is None
+    assert stripe_stub.called("Subscription.cancel")
 
 
 def test_signing_up_twice_is_refused(subscriber, as_member, stripe_stub):

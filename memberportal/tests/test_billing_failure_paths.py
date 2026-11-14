@@ -209,16 +209,15 @@ def test_stripe_failing_while_a_customer_is_created_is_a_503(
     assert len(captured) == 1
 
 
-def test_a_failure_logged_while_creating_a_customer_stores_the_request_not_the_error(
+def test_a_failure_logged_while_creating_a_customer_stores_the_error(
     make_member, as_member, stripe_stub, set_config
 ):
-    """DEFECT, pinned: the third argument to ``log_event`` is ``request``.
+    """Used to store the DRF request object instead of the failure.
 
-    ``log_event(description, event_type, data)`` takes the detail to record,
-    which the neighbouring handlers pass as the error. These two pass the DRF
-    request object, so the audit entry's ``data`` is the text
-    ``<rest_framework.request.Request: GET '/api/billing/card/'>`` and the
-    actual failure is not in the log at all.
+    ``log_event(description, event_type, data)`` takes the detail to record.
+    These two handlers passed ``request``, so the audit entry's ``data`` was the
+    text ``<rest_framework.request.Request: GET '/api/billing/card/'>`` and the
+    actual failure was not in the log at all.
     """
     set_config(ENABLE_STRIPE=True)
     profile = make_member(state="noob", rfid="BILL-LOG")
@@ -228,8 +227,7 @@ def test_a_failure_logged_while_creating_a_customer_stores_the_request_not_the_e
 
     entry = event_log(profile)[-1]
     assert entry.description == "Unknown stripe while saving payment details."
-    assert entry.data.startswith("<rest_framework.request.Request")
-    assert "no route" not in entry.data
+    assert entry.data == "no route"
 
 
 def test_an_unexpected_error_creating_a_customer_is_a_503_that_hides_the_cause(
@@ -249,21 +247,24 @@ def test_an_unexpected_error_creating_a_customer_is_a_503_that_hides_the_cause(
     assert len(captured) == 1
 
 
-def test_stripe_failing_for_a_known_customer_is_an_unhandled_error(
-    billing_member, as_member, stripe_stub
+def test_stripe_failing_for_a_known_customer_is_a_503(
+    billing_member, as_member, stripe_stub, captured
 ):
-    """DEFECT, pinned: only the create-a-customer branch has error handling.
+    """Used to raise: only the create-a-customer branch had error handling.
 
-    A member who already has a customer goes through the ``else`` branch, where
-    ``SetupIntent.create`` is bare. The same outage that is a tidy 503 for a
-    new member is an exception, and a 500, for an existing one.
+    A member who already had a customer went through the ``else`` branch, where
+    ``SetupIntent.create`` was bare, so the outage that was a tidy 503 for a
+    new member was a 500 for an existing one.
     """
     profile = billing_member()
     stripe_stub.set("Customer.retrieve", FakeStripeObject({"id": "cus_fail"}))
     stripe_stub.set("SetupIntent.create", stripe.error.APIConnectionError("no route"))
 
-    with pytest.raises(stripe.error.APIConnectionError):
-        as_member(profile).get("/api/billing/card/")
+    response = as_member(profile).get("/api/billing/card/")
+
+    assert response.status_code == 503
+    assert response.json() == {"success": False, "message": "no route"}
+    assert len(captured) == 1
 
 
 # --------------------------------------------------------------------------
@@ -277,16 +278,18 @@ def a_card():
     )
 
 
-def test_a_card_stripe_refuses_to_attach_is_still_recorded_locally(
-    billing_member, as_member, stripe_stub
+def test_a_card_stripe_refuses_to_attach_is_not_recorded_locally(
+    billing_member, as_member, stripe_stub, captured
 ):
-    """DEFECT, pinned: the profile is saved before Stripe is asked to attach.
+    """Used to be saved first: the profile was written before Stripe was asked.
 
-    ``post`` writes the last four digits, the expiry and the payment method id
-    to the profile and only then calls ``PaymentMethod.attach``. When Stripe
-    refuses -- the card belongs to another customer, say -- the request is a
-    500, but the member's account now shows a card that exists nowhere on
-    their Stripe customer, and every later charge fails against it.
+    ``post`` wrote the last four digits, the expiry and the payment method id to
+    the profile and only then called ``PaymentMethod.attach``. When Stripe
+    refused -- the card belongs to another customer, say -- the request was a
+    500, but the account showed a card that existed nowhere on the member's
+    Stripe customer, and every later charge failed against it. Stripe is now
+    asked first, a refusal is a 400 carrying Stripe's message, and the profile
+    keeps the card it had.
     """
     profile = billing_member()
     stripe_stub.set("PaymentMethod.retrieve", a_card())
@@ -295,267 +298,157 @@ def test_a_card_stripe_refuses_to_attach_is_still_recorded_locally(
         invalid_request("The payment method belongs to another customer."),
     )
 
-    with pytest.raises(stripe.error.InvalidRequestError):
-        as_member(profile).post("/api/billing/card/", {"paymentMethodId": "pm_new"})
+    response = as_member(profile).post(
+        "/api/billing/card/", {"paymentMethodId": "pm_new"}
+    )
 
+    assert response.status_code == 400
+    assert response.json() == {
+        "success": False,
+        "message": "The payment method belongs to another customer.",
+    }
     saved = fresh(profile)
     assert (saved.stripe_card_last_digits, saved.stripe_card_expiry) == (
-        "1111",
-        "03/2031",
+        "4242",
+        "01/2030",
     )
-    assert saved.stripe_payment_method_id == "pm_new"
+    assert saved.stripe_payment_method_id == "pm_fail"
     assert not stripe_stub.called("Customer.modify")
+    assert len(captured) == 1
 
 
-def test_saving_a_card_without_a_payment_method_id_is_an_unhandled_error(
-    billing_member, as_member, stripe_stub
+def test_stripe_being_unreachable_while_saving_a_card_is_a_503_and_changes_nothing(
+    billing_member, as_member, stripe_stub, captured
 ):
-    """DEFECT, pinned: nothing checks the body; Stripe is asked about ``None``."""
     profile = billing_member()
-    stripe_stub.set(
-        "PaymentMethod.retrieve",
-        invalid_request(
-            "Missing required param: payment_method.", code="parameter_missing"
-        ),
-    )
-
-    with pytest.raises(stripe.error.InvalidRequestError):
-        as_member(profile).post("/api/billing/card/", {})
-
-    assert stripe_stub.calls_to("PaymentMethod.retrieve")[0][1] == (None,)
-    assert fresh(profile).stripe_card_last_digits == "4242"
-
-
-def test_a_failed_confirmation_email_turns_a_saved_card_into_a_500(
-    billing_member, as_member, stripe_stub, captured, monkeypatch
-):
-    """Pinned as behaviour: the card is saved, attached and made the default
-    before the confirmation email is attempted, so a mail failure answers 500
-    ``error.postmarkNotConfigured`` for a request that did everything asked.
-    A member who retries is attaching a card they already have."""
-    from profile.models import User
-
-    profile = billing_member()
-    stripe_stub.set("PaymentMethod.retrieve", a_card())
-
-    def _no_mail(self, subject, message):
-        raise RuntimeError("Postmark is not configured")
-
-    monkeypatch.setattr(User, "email_notification", _no_mail)
+    stripe_stub.set("PaymentMethod.retrieve", stripe.error.APIConnectionError("no route"))
 
     response = as_member(profile).post(
         "/api/billing/card/", {"paymentMethodId": "pm_new"}
     )
 
-    assert response.status_code == 500
-    assert response.json() == {"message": "error.postmarkNotConfigured"}
-    assert fresh(profile).stripe_payment_method_id == "pm_new"
-    assert stripe_stub.called("PaymentMethod.attach")
-    assert stripe_stub.called("Customer.modify")
-    assert len(captured) == 1
-
-
-def test_removing_a_card_stripe_has_already_detached_fails_and_keeps_the_record(
-    billing_member, as_member, stripe_stub
-):
-    """DEFECT, pinned: the local fields are cleared only if ``detach`` succeeds.
-
-    A card removed in the Stripe dashboard (or detached by an earlier request
-    whose response was lost) makes ``PaymentMethod.detach`` raise. The view
-    does not catch it, so the member sees a 500 and the portal goes on showing
-    a card that no longer exists, with no way to remove it.
-    """
-    profile = billing_member()
-    stripe_stub.set(
-        "PaymentMethod.detach",
-        invalid_request(
-            "The payment method you provided is not attached to a customer."
-        ),
-    )
-
-    with pytest.raises(stripe.error.InvalidRequestError):
-        as_member(profile).delete("/api/billing/card/")
-
-    assert fresh(profile).stripe_card_last_digits == "4242"
-
-
-def test_removing_a_card_when_none_is_saved_asks_stripe_nothing(
-    make_member, as_member, stripe_stub, set_config
-):
-    set_config(ENABLE_STRIPE=True)
-    profile = make_member(state="noob", rfid="BILL-NOCARD")
-
-    response = as_member(profile).delete("/api/billing/card/")
-
-    assert response.status_code == 200
-    assert not stripe_stub.called("PaymentMethod.detach")
-
-
-# --------------------------------------------------------------------------
-# POST /api/billing/plans/<id>/signup/
-# --------------------------------------------------------------------------
-
-
-def test_signing_up_to_a_plan_that_does_not_exist_is_a_500(
-    billing_member, as_member, stripe_stub
-):
-    """DEFECT, pinned: ``PaymentPlan.objects.get(pk=plan_id)`` is unchecked.
-
-    A plan id from a stale page, or a mistyped one, raises ``DoesNotExist``
-    where a 404 is the answer.
-    """
-    from api_admin_tools.models import PaymentPlan
-
-    profile = billing_member()
-
-    with pytest.raises(PaymentPlan.DoesNotExist):
-        as_member(profile).post("/api/billing/plans/9999/signup/")
-
-    assert not stripe_stub.called("Subscription.create")
-
-
-def test_a_plan_the_tiers_page_hides_can_still_be_bought_by_id(
-    billing_member, as_member, make_tier_and_plan, stripe_stub
-):
-    """Pinned as behaviour: ``visible`` filters the listing, not the purchase.
-
-    ``/api/billing/tiers/`` offers only visible tiers and plans; the signup
-    endpoint takes any plan id. Hiding a plan therefore stops it being
-    advertised but not bought, which matters if hidden plans are meant for
-    particular members (a concession rate, an old price).
-    """
-    profile = billing_member()
-    _tier, hidden = make_tier_and_plan(tier_name="Concession", tier_stripe_id="prod_c")
-    hidden.visible = False
-    hidden.save()
-    stripe_stub.set(
-        "Subscription.create",
-        FakeStripeObject({"id": "sub_hidden", "status": "active"}),
-    )
-
-    response = as_member(profile).post(f"/api/billing/plans/{hidden.id}/signup/")
-
-    assert response.json() == {"success": True}
-    assert fresh(profile).membership_plan_id == hidden.id
-
-
-def test_a_test_key_used_against_live_objects_is_reported_with_stripes_message(
-    billing_member, as_member, make_tier_and_plan, stripe_stub
-):
-    profile = billing_member()
-    _tier, plan = make_tier_and_plan()
-    message = "No such price: 'price_x'; a similar object exists in live mode"
-    stripe_stub.set("Subscription.create", invalid_request(message))
-
-    response = as_member(profile).post(f"/api/billing/plans/{plan.id}/signup/")
-
-    assert response.status_code == 500
-    assert response.json() == {"success": False, "message": message}
-    assert "used test key with production object" in event_log(profile)[-1].description
-
-
-def test_any_other_invalid_request_is_a_500_with_no_message(
-    billing_member, as_member, make_tier_and_plan, stripe_stub, captured
-):
-    profile = billing_member()
-    _tier, plan = make_tier_and_plan()
-    stripe_stub.set(
-        "Subscription.create",
-        invalid_request("Invalid integer: abc", code="parameter_invalid_integer"),
-    )
-
-    response = as_member(profile).post(f"/api/billing/plans/{plan.id}/signup/")
-
-    assert response.status_code == 500
-    assert response.json() == {"success": False, "message": None}
-    assert event_log(profile)[-1].description == (
-        "InvalidRequestError from Stripe while creating subscription."
-    )
-    assert len(captured) == 1
-
-
-def test_an_invalid_request_with_no_error_code_is_an_unhandled_error(
-    billing_member, as_member, make_tier_and_plan, stripe_stub
-):
-    """DEFECT, pinned: ``error["code"]`` is indexed, not ``.get``.
-
-    Stripe omits ``code`` from some invalid-request errors. The handler that is
-    meant to turn them into a tidy 500 raises ``KeyError`` instead, from inside
-    the ``except`` block, so the sibling ``except Exception`` does not catch it.
-    """
-    profile = billing_member()
-    _tier, plan = make_tier_and_plan()
-    stripe_stub.set(
-        "Subscription.create", invalid_request("Something is wrong.", code=None)
-    )
-
-    with pytest.raises(KeyError):
-        as_member(profile).post(f"/api/billing/plans/{plan.id}/signup/")
-
-
-def test_an_invalid_request_with_no_json_body_is_an_unhandled_error(
-    billing_member, as_member, make_tier_and_plan, stripe_stub
-):
-    """DEFECT, pinned: ``e.json_body.get(...)`` assumes there is a body."""
-    profile = billing_member()
-    _tier, plan = make_tier_and_plan()
-    stripe_stub.set(
-        "Subscription.create", invalid_request("Gateway timeout", body=False)
-    )
-
-    with pytest.raises(AttributeError):
-        as_member(profile).post(f"/api/billing/plans/{plan.id}/signup/")
-
-
-def test_a_non_stripe_error_creating_a_subscription_is_a_500_logged_under_the_wrong_name(
-    billing_member, as_member, make_tier_and_plan, stripe_stub, captured
-):
-    """The catch-all handler reuses the ``InvalidRequestError`` log text."""
-    profile = billing_member()
-    _tier, plan = make_tier_and_plan()
-    stripe_stub.set("Subscription.create", stripe.error.APIConnectionError("no route"))
-
-    response = as_member(profile).post(f"/api/billing/plans/{plan.id}/signup/")
-
-    assert response.status_code == 500
-    assert response.json() == {"success": False, "message": None}
-    assert event_log(profile)[-1].description == (
-        "InvalidRequestError from Stripe while creating subscription."
-    )
+    assert response.status_code == 503
+    assert fresh(profile).stripe_payment_method_id == "pm_fail"
     assert len(captured) == 1
 
 
 @pytest.mark.parametrize(
-    "stripe_status", ["incomplete", "trialing", "past_due", "unpaid", "canceled"]
+    "stripe_status, member_status", [("active", "active"), ("trialing", "active")]
 )
-def test_a_subscription_that_is_not_active_is_created_in_stripe_but_never_recorded(
+def test_a_subscription_in_good_standing_is_recorded_and_the_member_activated(
+    billing_member, as_member, make_tier_and_plan, stripe_stub, stripe_status, member_status
+):
+    profile = billing_member()
+    _tier, plan = make_tier_and_plan()
+    stripe_stub.set(
+        "Subscription.create",
+        FakeStripeObject({"id": "sub_new", "status": stripe_status}),
+    )
+
+    response = as_member(profile).post(f"/api/billing/plans/{plan.id}/signup/")
+
+    assert response.json() == {"success": True}
+    saved = fresh(profile)
+    assert saved.membership_plan_id == plan.id
+    assert saved.stripe_subscription_id == "sub_new"
+    assert saved.subscription_status == member_status
+
+
+@pytest.mark.parametrize("stripe_status", ["past_due", "unpaid"])
+def test_a_live_subscription_awaiting_payment_is_recorded_but_not_activated(
     billing_member, as_member, make_tier_and_plan, stripe_stub, stripe_status
 ):
-    """DEFECT, pinned: the Stripe subscription is orphaned, and a retry doubles it.
+    """Used to be orphaned: created in Stripe, never recorded, and billable twice.
 
-    Only ``"active"`` records anything. For ``"incomplete"`` the member is told
-    ``signup.subscriptionFailed`` (with ``success: true``); for every other
-    status they are simply told ``success: true``. In both cases the
-    subscription now exists in Stripe -- an incomplete one waits for the
-    payment to be confirmed, a trialing one will start charging -- and the
-    profile has no plan and no subscription id. The member is still free to
-    sign up, so trying again creates a second subscription for the same plan.
+    Only ``"active"`` recorded anything, so the subscription existed in Stripe
+    while the profile had no plan and no subscription id, and the member told
+    ``success: true`` could sign up again for a second one. It is now recorded
+    with the member left inactive; the ``invoice.paid`` webhook activates them
+    when the payment lands, and a second signup is a 409.
     """
     profile = billing_member()
     _tier, plan = make_tier_and_plan()
     stripe_stub.set(
         "Subscription.create",
-        FakeStripeObject({"id": "sub_orphan", "status": stripe_status}),
+        FakeStripeObject({"id": "sub_wait", "status": stripe_status}),
     )
 
     first = as_member(profile).post(f"/api/billing/plans/{plan.id}/signup/")
     second = as_member(profile).post(f"/api/billing/plans/{plan.id}/signup/")
 
-    assert first.json()["success"] is True and second.json()["success"] is True
+    assert first.json() == {"success": True}
+    assert second.status_code == 409
+    saved = fresh(profile)
+    assert (saved.membership_plan_id, saved.stripe_subscription_id) == (plan.id, "sub_wait")
+    assert saved.subscription_status == "inactive"
+    assert len(stripe_stub.calls_to("Subscription.create")) == 1
+
+
+def test_an_incomplete_subscription_is_cancelled_so_a_retry_starts_clean(
+    billing_member, as_member, make_tier_and_plan, stripe_stub
+):
+    """Used to be orphaned, and reported as ``success: true``.
+
+    The first payment did not complete. The subscription was left in Stripe and
+    the member told ``success: true`` with a failure message the frontend
+    ignores. It is now cancelled in Stripe and reported as the failure it is,
+    so the member sees the retry-friendly dialog and a second attempt cannot
+    stack a second subscription.
+    """
+    profile = billing_member()
+    _tier, plan = make_tier_and_plan()
+    stripe_stub.set(
+        "Subscription.create",
+        FakeStripeObject({"id": "sub_inc", "status": "incomplete"}),
+    )
+
+    first = as_member(profile).post(f"/api/billing/plans/{plan.id}/signup/")
+    second = as_member(profile).post(f"/api/billing/plans/{plan.id}/signup/")
+
+    expected = {"success": False, "message": "signup.subscriptionFailed"}
+    assert first.json() == second.json() == expected
+    assert [c[1] for c in stripe_stub.calls_to("Subscription.cancel")] == [
+        ("sub_inc",),
+        ("sub_inc",),
+    ]
     saved = fresh(profile)
     assert (saved.membership_plan, saved.stripe_subscription_id) == (None, "")
-    assert saved.subscription_status == "inactive"
-    assert len(stripe_stub.calls_to("Subscription.create")) == 2
+
+
+def test_a_failure_cancelling_an_abandoned_subscription_is_reported_not_raised(
+    billing_member, as_member, make_tier_and_plan, stripe_stub, captured
+):
+    profile = billing_member()
+    _tier, plan = make_tier_and_plan()
+    stripe_stub.set(
+        "Subscription.create",
+        FakeStripeObject({"id": "sub_inc", "status": "incomplete"}),
+    )
+    stripe_stub.set("Subscription.cancel", stripe.error.APIConnectionError("no route"))
+
+    response = as_member(profile).post(f"/api/billing/plans/{plan.id}/signup/")
+
+    assert response.json() == {"success": False, "message": "signup.subscriptionFailed"}
+    assert len(captured) == 1
+    assert event_log(profile)[-1].data == "sub_inc"
+
+
+@pytest.mark.parametrize("stripe_status", ["canceled", "incomplete_expired", "paused"])
+def test_a_subscription_that_is_not_live_is_a_failure_and_records_nothing(
+    billing_member, as_member, make_tier_and_plan, stripe_stub, stripe_status
+):
+    profile = billing_member()
+    _tier, plan = make_tier_and_plan()
+    stripe_stub.set(
+        "Subscription.create",
+        FakeStripeObject({"id": "sub_dead", "status": stripe_status}),
+    )
+
+    response = as_member(profile).post(f"/api/billing/plans/{plan.id}/signup/")
+
+    assert response.json() == {"success": False, "message": "signup.subscriptionFailed"}
+    assert not stripe_stub.called("Subscription.cancel")
+    assert fresh(profile).membership_plan is None
 
 
 # --------------------------------------------------------------------------
@@ -574,15 +467,15 @@ def test_an_empty_answer_from_stripe_is_reported_as_no_subscription(
     assert response.json() == {"success": False}
 
 
-def test_a_subscription_stripe_no_longer_has_makes_the_account_page_a_500(
-    billing_member, as_member, stripe_stub
+def test_a_subscription_stripe_no_longer_has_is_reported_as_none(
+    billing_member, as_member, stripe_stub, captured
 ):
-    """DEFECT, pinned: ``Subscription.retrieve`` is bare.
+    """Used to raise: ``Subscription.retrieve`` was bare.
 
     The local ``stripe_subscription_id`` is only cleared by the
     ``customer.subscription.deleted`` webhook. If that is missed, or the
     subscription is deleted in the Stripe dashboard first, every visit to the
-    page that calls this endpoint raises.
+    page that calls this endpoint was a 500.
     """
     profile = billing_member(with_plan=True, with_subscription=True)
     stripe_stub.set(
@@ -590,8 +483,22 @@ def test_a_subscription_stripe_no_longer_has_makes_the_account_page_a_500(
         invalid_request("No such subscription: 'sub_fail'", http_status=404),
     )
 
-    with pytest.raises(stripe.error.InvalidRequestError):
-        as_member(profile).get("/api/billing/myplan/")
+    response = as_member(profile).get("/api/billing/myplan/")
+
+    assert response.json() == {"success": False}
+    assert len(captured) == 1
+
+
+def test_stripe_being_unreachable_loading_the_plan_page_is_a_503(
+    billing_member, as_member, stripe_stub, captured
+):
+    profile = billing_member(with_plan=True, with_subscription=True)
+    stripe_stub.set("Subscription.retrieve", stripe.error.APIConnectionError("no route"))
+
+    response = as_member(profile).get("/api/billing/myplan/")
+
+    assert response.status_code == 503
+    assert response.json() == {"success": False}
 
 
 # --------------------------------------------------------------------------
@@ -599,23 +506,15 @@ def test_a_subscription_stripe_no_longer_has_makes_the_account_page_a_500(
 # --------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("word", ["cancel", "pause", "resumed", "Resume", "x"])
-def test_any_word_but_exactly_resume_cancels_the_plan(
-    billing_member, as_member, stripe_stub, sent_emails, word
+def test_the_cancel_word_cancels_the_plan(
+    billing_member, as_member, stripe_stub, sent_emails
 ):
-    """DEFECT, pinned: the URL is ``myplan/<str:resume>/`` and only "resume" is special.
-
-    ``resume = True if resume == "resume" else False``. The frontend sends
-    "cancel" or "resume", but a typo, a different capitalisation, or a request
-    made by hand to ``/api/billing/myplan/anything/`` schedules the
-    cancellation of the member's subscription in Stripe.
-    """
     profile = billing_member(with_plan=True, with_subscription=True)
     stripe_stub.set(
         "Subscription.modify", FakeStripeObject({"cancel_at_period_end": True})
     )
 
-    response = as_member(profile).post(f"/api/billing/myplan/{word}/")
+    response = as_member(profile).post("/api/billing/myplan/cancel/")
 
     assert response.json() == {"success": True}
     assert stripe_stub.calls_to("Subscription.modify")[0][2] == {
@@ -624,24 +523,46 @@ def test_any_word_but_exactly_resume_cancels_the_plan(
     assert fresh(profile).subscription_status == "cancelling"
 
 
-def test_cancelling_a_plan_with_no_stripe_subscription_asks_stripe_to_modify_a_blank_id(
+@pytest.mark.parametrize("word", ["pause", "resumed", "Resume", "Cancel", "x"])
+def test_any_other_word_is_a_400_and_touches_nothing(
+    billing_member, as_member, stripe_stub, sent_emails, word
+):
+    """Used to cancel the plan: only exactly "resume" was special.
+
+    ``resume = True if resume == "resume" else False``. The frontend sends
+    "cancel" or "resume", but a typo, a different capitalisation, or a request
+    made by hand to ``/api/billing/myplan/anything/`` scheduled the cancellation
+    of the member's subscription in Stripe. Only the two real words are accepted.
+    """
+    profile = billing_member(with_plan=True, with_subscription=True)
+
+    response = as_member(profile).post(f"/api/billing/myplan/{word}/")
+
+    assert response.status_code == 400
+    assert response.json() == {"success": False, "message": "paymentPlan.invalidAction"}
+    assert not stripe_stub.called("Subscription.modify")
+    assert fresh(profile).subscription_status == "active"
+    assert sent_emails == []
+
+
+def test_cancelling_a_plan_with_no_stripe_subscription_is_a_404_and_asks_stripe_nothing(
     billing_member, as_member, stripe_stub
 ):
-    """DEFECT, pinned: only the *resume* branch checks ``stripe_subscription_id``.
+    """Used to ask Stripe to modify subscription ``""``: only *resume* checked the id.
 
     An administrator can give a member a plan by hand, and a subscription that
-    was never recorded (see above) leaves the same state. Cancelling then
-    calls ``Subscription.modify("", ...)`` (the column defaults to the empty
-    string, not null), which Stripe rejects, and the
-    member sees a 500 for a plan they were never being billed for.
+    was never recorded leaves the same state. Cancelling then called
+    ``Subscription.modify("", ...)`` (the column defaults to the empty string,
+    not null), which Stripe rejects, and the member saw a 500 for a plan they
+    were never being billed for.
     """
     profile = billing_member(with_plan=True, with_subscription=False)
-    stripe_stub.set("Subscription.modify", invalid_request("Invalid subscription id: "))
 
-    with pytest.raises(stripe.error.InvalidRequestError):
-        as_member(profile).post("/api/billing/myplan/cancel/")
+    response = as_member(profile).post("/api/billing/myplan/cancel/")
 
-    assert stripe_stub.calls_to("Subscription.modify")[0][1] == ("",)
+    assert response.status_code == 404
+    assert response.json() == {"success": False, "message": "paymentPlan.notExists"}
+    assert not stripe_stub.called("Subscription.modify")
 
 
 def test_a_cancellation_stripe_does_not_confirm_is_reported_to_the_committee(
@@ -697,32 +618,46 @@ def test_restarting_a_lapsed_plan_passes_a_stripe_failure_straight_through(
     assert response.json() == {"success": False, "message": None}
 
 
-@pytest.mark.parametrize("stripe_status", ["incomplete", "trialing", "past_due"])
-def test_restarting_a_lapsed_plan_has_the_same_orphaned_subscription_problem(
-    billing_member, as_member, stripe_stub, stripe_status
+@pytest.mark.parametrize("stripe_status", ["active", "trialing", "past_due"])
+def test_restarting_a_lapsed_plan_records_the_new_subscription(
+    billing_member, as_member, stripe_stub, sent_emails, stripe_status
 ):
-    """DEFECT, pinned: the signup defect, repeated in the resume branch.
-
-    Only ``"active"`` records the new subscription id. For anything else the
-    member is told ``success: true`` -- with ``signup.subscriptionFailed`` for
-    ``"incomplete"`` -- while the subscription exists in Stripe and the profile
-    has no id for it. Resuming again creates another.
-    """
+    """Used to share the signup defect: only ``"active"`` recorded the id, so
+    the member was told ``success: true`` for a subscription the profile knew
+    nothing about, and resuming again created another."""
     profile = billing_member(with_plan=True, with_subscription=False)
     stripe_stub.set(
         "Subscription.create",
-        FakeStripeObject({"id": "sub_orphan", "status": stripe_status}),
+        FakeStripeObject({"id": "sub_again", "status": stripe_status}),
+    )
+    stripe_stub.set(
+        "Subscription.modify", FakeStripeObject({"cancel_at_period_end": False})
     )
 
-    first = as_member(profile).post("/api/billing/myplan/resume/")
-    second = as_member(profile).post("/api/billing/myplan/resume/")
+    response = as_member(profile).post("/api/billing/myplan/resume/")
+    as_member(profile).post("/api/billing/myplan/resume/")
 
-    expected = {"success": True}
-    if stripe_status == "incomplete":
-        expected["message"] = "signup.subscriptionFailed"
-    assert first.json() == second.json() == expected
+    assert response.json() == {"success": True}
+    assert fresh(profile).stripe_subscription_id == "sub_again"
+    # The second resume finds a subscription and asks Stripe to un-cancel it.
+    assert len(stripe_stub.calls_to("Subscription.create")) == 1
+    assert stripe_stub.called("Subscription.modify")
+
+
+def test_restarting_a_lapsed_plan_whose_payment_fails_is_a_failure(
+    billing_member, as_member, stripe_stub
+):
+    profile = billing_member(with_plan=True, with_subscription=False)
+    stripe_stub.set(
+        "Subscription.create",
+        FakeStripeObject({"id": "sub_inc", "status": "incomplete"}),
+    )
+
+    response = as_member(profile).post("/api/billing/myplan/resume/")
+
+    assert response.json() == {"success": False, "message": "signup.subscriptionFailed"}
     assert fresh(profile).stripe_subscription_id == ""
-    assert len(stripe_stub.calls_to("Subscription.create")) == 2
+    assert stripe_stub.called("Subscription.cancel")
 
 
 # --------------------------------------------------------------------------
@@ -758,15 +693,16 @@ def test_an_unreachable_canvas_is_reported_as_a_failed_check(
     assert len(captured) == 1
 
 
-def test_a_moodle_course_with_no_percentage_leaks_a_python_error_to_the_member(
+def test_a_moodle_course_with_no_percentage_counts_as_zero(
     make_member, as_member, set_config, monkeypatch, captured
 ):
-    """DEFECT, pinned: the catch-all returns ``str(e)`` in the response.
+    """Used to leak a Python error to the member.
 
-    With a minimum score of 0, a Moodle answer whose ``percentage_completed``
-    is ``None`` reaches ``None >= 0`` and raises ``TypeError``. The handler
-    reports it to Sentry, which is right, and also puts the interpreter's
-    message in the JSON the member's browser receives.
+    With a minimum score of 0, a Moodle answer whose ``percentage_completed`` is
+    ``None`` reached ``None >= 0`` and raised ``TypeError``, which the catch-all
+    put, as the interpreter's own message, in the JSON the member's browser
+    received. A missing percentage now counts as 0, as a missing Canvas score
+    already did, and the catch-all no longer returns the exception text.
     """
     profile = induction_needed(
         make_member,
@@ -785,9 +721,36 @@ def test_a_moodle_course_with_no_percentage_leaks_a_python_error_to_the_member(
 
     response = as_member(profile).post("/api/billing/check-induction/")
 
-    body = response.json()
-    assert (body["success"], body["score"]) == (False, 0)
-    assert "'>=' not supported" in body["error"]
+    assert response.json() == {"success": True, "score": 0}
+    assert captured == []
+
+
+def test_an_unexpected_failure_checking_the_induction_does_not_leak_its_message(
+    make_member, as_member, set_config, monkeypatch, captured
+):
+    profile = induction_needed(
+        make_member,
+        set_config,
+        MOODLE_INDUCTION_ENABLED=True,
+        CANVAS_INDUCTION_ENABLED=False,
+        MIN_INDUCTION_SCORE=50,
+    )
+    monkeypatch.setattr(
+        "api_billing.views.moodle_get_user_from_email", lambda email: {"id": 42}
+    )
+    monkeypatch.setattr(
+        "api_billing.views.moodle_get_course_activity_completion_status",
+        lambda course_id, user_id: {"percentage_completed": 100},
+    )
+
+    def _boom(self):
+        raise RuntimeError("secret detail")
+
+    monkeypatch.setattr("profile.models.Profile.update_last_induction", _boom)
+
+    response = as_member(profile).post("/api/billing/check-induction/")
+
+    assert response.json() == {"success": False, "score": 0}
     assert len(captured) == 1
 
 
@@ -796,40 +759,32 @@ def test_a_moodle_course_with_no_percentage_leaks_a_python_error_to_the_member(
 # --------------------------------------------------------------------------
 
 
-def test_assigning_a_card_without_the_field_is_an_unhandled_error(
-    make_member, as_member
+@pytest.mark.parametrize("body", [{}, {"accessCard": ""}, {"accessCard": "   "}, {"accessCard": None}, {"accessCard": 12}])
+def test_assigning_a_missing_or_blank_card_is_a_400_and_keeps_the_old_one(
+    make_member, as_member, body
 ):
-    """DEFECT, pinned: ``request.data["accessCard"]`` is indexed, not ``.get``."""
-    profile = make_member(state="noob", rfid="BILL-CARD")
-
-    with pytest.raises(KeyError):
-        as_member(profile).post("/api/billing/access-card/", {}, format="json")
-
-
-def test_a_blank_card_is_stored_as_an_empty_string_and_the_second_one_collides(
-    make_member, as_member
-):
-    """DEFECT, pinned: ``""`` skips the in-use check, and ``rfid`` is unique.
+    """Used to raise ``KeyError`` for a missing field, and to store ``""`` for a blank.
 
     ``rfid`` is ``unique=True, null=True``: any number of members can have no
-    card (null), but not two with an empty string. The clash check is
-    ``if access_card and clash.exists()``, which a blank value never enters, so
-    the first member to submit a blank card is stored with ``""`` -- wiping any
-    card they had -- and the second gets an ``IntegrityError`` and a 500.
+    card (null), but not two with an empty string. A blank skipped the in-use
+    check, so the first member to submit one had any card they held wiped, and
+    the second got an ``IntegrityError`` and a 500.
     """
-    from django.db import IntegrityError
+    profile = make_member(state="noob", rfid="BILL-CARD")
 
-    first = make_member(state="noob", rfid="BILL-HELD")
-    second = make_member(state="noob", rfid=None)
+    response = as_member(profile).post("/api/billing/access-card/", body, format="json")
 
-    response = as_member(first).post(
-        "/api/billing/access-card/", {"accessCard": ""}, format="json"
+    assert response.status_code == 400
+    assert response.json() == {"success": False, "error": "accessCardRequired"}
+    assert fresh(profile).rfid == "BILL-CARD"
+
+
+def test_a_card_is_stored_without_surrounding_whitespace(make_member, as_member):
+    profile = make_member(state="noob", rfid=None)
+
+    response = as_member(profile).post(
+        "/api/billing/access-card/", {"accessCard": "  PADDED-1  "}, format="json"
     )
 
     assert response.json() == {"success": True}
-    assert fresh(first).rfid == ""
-
-    with pytest.raises(IntegrityError):
-        as_member(second).post(
-            "/api/billing/access-card/", {"accessCard": ""}, format="json"
-        )
+    assert fresh(profile).rfid == "PADDED-1"

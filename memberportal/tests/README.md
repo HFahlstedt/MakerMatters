@@ -65,6 +65,16 @@ rather than a patch, or because nobody has asked yet:
   public by design, and exposes the active member count and how many people
   are signed in to the site.
 
+- Billing, in `test_billing_failure_paths.py`. `ENABLE_STRIPE` only decides
+  whether the API key is set; the endpoints still run and call Stripe when it is
+  off. A failed confirmation email turns an already-saved card into a 500. A
+  plan marked not visible is hidden from the tiers page but can still be bought
+  by id. Only a 404 from `Customer.retrieve` means "no such customer"; any other
+  error looking one up is reported and ignored. A `past_due` or `unpaid`
+  subscription is recorded with the member left inactive until the
+  `invoice.paid` webhook, and an `incomplete` one is cancelled in Stripe so a
+  retry starts clean; both are choices, not facts about Stripe.
+
 ## Running
 
 ```bash

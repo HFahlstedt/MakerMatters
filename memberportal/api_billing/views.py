@@ -67,8 +67,8 @@ class MemberBucksAddCard(StripeAPIView):
         else:
             customer_exists = False
 
-        if not customer_exists:
-            try:
+        try:
+            if not customer_exists:
                 request.user.log_event(
                     "Attempting to create stripe customer.", "stripe"
                 )
@@ -86,69 +86,91 @@ class MemberBucksAddCard(StripeAPIView):
                     "stripe",
                 )
 
-                intent = stripe.SetupIntent.create(customer=profile.stripe_customer_id)
-
-                return Response({"clientSecret": intent.client_secret})
-
-            except stripe.error.StripeError as e:
-                request.user.log_event(
-                    "Unknown stripe while saving payment details.",
-                    "stripe",
-                    request,
-                )
-                capture_exception(e)
-
-                return Response(
-                    {
-                        "success": False,
-                        "message": str(e),
-                    },
-                    status=status.HTTP_503_SERVICE_UNAVAILABLE,
-                )
-
-            except Exception as e:
-                request.user.log_event(
-                    "Unknown other error while saving payment details.",
-                    "stripe",
-                    request,
-                )
-                capture_exception(e)
-                return Response(
-                    {
-                        "success": False,
-                        "message": "Unknown error (unrelated to stripe).",
-                    },
-                    status=status.HTTP_503_SERVICE_UNAVAILABLE,
-                )
-
-        else:
             intent = stripe.SetupIntent.create(customer=profile.stripe_customer_id)
 
             return Response({"clientSecret": intent.client_secret})
+
+        except stripe.error.StripeError as e:
+            request.user.log_event(
+                "Unknown stripe while saving payment details.",
+                "stripe",
+                str(e),
+            )
+            capture_exception(e)
+
+            return Response(
+                {
+                    "success": False,
+                    "message": str(e),
+                },
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+
+        except Exception as e:
+            request.user.log_event(
+                "Unknown other error while saving payment details.",
+                "stripe",
+                str(e),
+            )
+            capture_exception(e)
+            return Response(
+                {
+                    "success": False,
+                    "message": "Unknown error (unrelated to stripe).",
+                },
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
 
     def post(self, request):
         profile = request.user.profile
         payment_method_id = request.data.get("paymentMethodId")
 
-        payment_method = stripe.PaymentMethod.retrieve(payment_method_id)
+        if not payment_method_id or not isinstance(payment_method_id, str):
+            return Response(
+                {"success": False, "message": "paymentMethodId is required."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            payment_method = stripe.PaymentMethod.retrieve(payment_method_id)
+
+            # attach the payment method to the customer
+            stripe.PaymentMethod.attach(
+                payment_method_id,
+                customer=profile.stripe_customer_id,
+            )
+            # Set the default payment method on the customer
+            stripe.Customer.modify(
+                profile.stripe_customer_id,
+                invoice_settings={
+                    "default_payment_method": payment_method_id,
+                },
+            )
+        except (stripe.error.InvalidRequestError, stripe.error.CardError) as e:
+            # Stripe refused the card: nothing is recorded locally, so the
+            # profile only ever shows a card that is attached in Stripe.
+            capture_exception(e)
+            request.user.log_event(
+                "Stripe refused the payment card.", "stripe", str(e)
+            )
+            return Response(
+                {"success": False, "message": str(e)},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        except stripe.error.StripeError as e:
+            capture_exception(e)
+            request.user.log_event(
+                "Stripe error while saving payment details.", "stripe", str(e)
+            )
+            return Response(
+                {"success": False, "message": str(e)},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
 
         profile.stripe_card_last_digits = payment_method["card"]["last4"]
         profile.stripe_card_expiry = f"{str(payment_method['card']['exp_month']).zfill(2)}/{str(payment_method['card']['exp_year'])}"
         profile.stripe_payment_method_id = payment_method_id
         profile.save()
-
-        # attached the payment method to the customer
-        stripe.PaymentMethod.attach(
-            payment_method_id,
-            customer=profile.stripe_customer_id,
-        )
-        # Set the default payment method on the customer
-        stripe.Customer.modify(
-            profile.stripe_customer_id,
-            invoice_settings={
-                "default_payment_method": payment_method_id,
-            },
-        )
 
         subject = f"You just added a payment card to your {config.SITE_OWNER} account."
 
@@ -173,7 +195,22 @@ class MemberBucksAddCard(StripeAPIView):
         profile = request.user.profile
 
         if profile.stripe_payment_method_id:
-            stripe.PaymentMethod.detach(profile.stripe_payment_method_id)
+            try:
+                stripe.PaymentMethod.detach(profile.stripe_payment_method_id)
+            except stripe.error.InvalidRequestError as e:
+                # Stripe no longer has the card attached (removed in the
+                # dashboard, or by an earlier request whose answer was lost).
+                # The aim is a profile without it, so carry on and clear it.
+                capture_exception(e)
+            except stripe.error.StripeError as e:
+                # Stripe could not be reached: keep the record so the member
+                # can try again, rather than forgetting a card that is
+                # still attached.
+                capture_exception(e)
+                return Response(
+                    {"success": False, "message": str(e)},
+                    status=status.HTTP_503_SERVICE_UNAVAILABLE,
+                )
 
         profile.stripe_payment_method_id = ""
         profile.stripe_card_last_digits = ""
@@ -236,12 +273,11 @@ class PaymentPlanSignup(StripeAPIView):
 
         except stripe.error.InvalidRequestError as e:
             capture_exception(e)
-            error = e.json_body.get("error")
+            error = (e.json_body or {}).get("error") or {}
+            code = error.get("code")
+            message = error.get("message") or ""
 
-            if (
-                error["code"] == "resource_missing"
-                and "default payment method" in error["message"]
-            ):
+            if code == "resource_missing" and "default payment method" in message:
                 request.user.log_event(
                     "InvalidRequestError (missing default payment method) from Stripe while creating subscription.",
                     "stripe",
@@ -259,8 +295,8 @@ class PaymentPlanSignup(StripeAPIView):
                 return self.create_subscription(request, new_plan, attempts)
 
             if (
-                error["code"] == "resource_missing"
-                and "a similar object exists in live mode" in error["message"]
+                code == "resource_missing"
+                and "a similar object exists in live mode" in message
             ):
                 request.user.log_event(
                     "InvalidRequestError (used test key with production object) from Stripe while "
@@ -272,7 +308,7 @@ class PaymentPlanSignup(StripeAPIView):
                 return Response(
                     {
                         "success": False,
-                        "message": error["message"],
+                        "message": message,
                     },
                     status=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 )
@@ -293,9 +329,9 @@ class PaymentPlanSignup(StripeAPIView):
 
         except Exception as e:
             request.user.log_event(
-                "InvalidRequestError from Stripe while creating subscription.",
+                "Error while creating subscription.",
                 "stripe",
-                e,
+                str(e),
             )
             capture_exception(e)
             return Response(
@@ -306,9 +342,58 @@ class PaymentPlanSignup(StripeAPIView):
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
 
+    def settle_subscription(self, request, subscription, plan):
+        """Record what Stripe created, so the portal and Stripe agree.
+
+        A subscription that exists in Stripe is never left unrecorded, because
+        a member who is billed for something the portal doesn't know about can
+        sign up again and be billed twice.
+        """
+        profile = request.user.profile
+        state = subscription.status
+
+        if state in ("active", "trialing", "past_due", "unpaid"):
+            # "past_due" and "unpaid" are live subscriptions whose payment has
+            # not gone through: keep them, leave the member inactive, and let
+            # the invoice.paid webhook activate them when the payment lands.
+            profile.stripe_subscription_id = subscription.id
+            profile.membership_plan = plan
+            profile.subscription_status = (
+                "active" if state in ("active", "trialing") else "inactive"
+            )
+            profile.save()
+
+            request.user.log_event(
+                f"Created subscription in Stripe with status {state}.",
+                "stripe",
+                subscription.id,
+            )
+            return Response({"success": True})
+
+        if state == "incomplete":
+            # The first payment did not complete. Abandon the subscription so
+            # that trying again starts clean instead of stacking a second one.
+            try:
+                stripe.Subscription.cancel(subscription.id)
+            except stripe.error.StripeError as e:
+                capture_exception(e)
+
+        request.user.log_event(
+            f"Failed to create subscription in Stripe with status {state}.",
+            "stripe",
+            subscription.id,
+        )
+        return Response({"success": False, "message": "signup.subscriptionFailed"})
+
     def post(self, request, plan_id):
         current_plan = request.user.profile.membership_plan
-        new_plan = PaymentPlan.objects.get(pk=plan_id)
+        new_plan = PaymentPlan.objects.filter(pk=plan_id).first()
+
+        if new_plan is None:
+            return Response(
+                {"success": False, "message": "paymentPlan.notExists"},
+                status=status.HTTP_404_NOT_FOUND,
+            )
 
         if current_plan:
             return Response({"success": False}, status=status.HTTP_409_CONFLICT)
@@ -321,44 +406,7 @@ class PaymentPlanSignup(StripeAPIView):
         if isinstance(new_subscription, Response):
             return new_subscription
 
-        try:
-            if new_subscription.status == "active":
-                request.user.profile.stripe_subscription_id = new_subscription.id
-                request.user.profile.membership_plan = new_plan
-                request.user.profile.subscription_status = "active"
-                request.user.profile.save()
-
-                request.user.log_event(
-                    "Successfully created subscription in Stripe.",
-                    "stripe",
-                    "",
-                )
-
-                return Response({"success": True})
-
-            elif new_subscription.status == "incomplete":
-                # if we got here, that means the subscription wasn't successfully created
-                request.user.log_event(
-                    f"Failed to create subscription in Stripe with status {new_subscription.status}.",
-                    "stripe",
-                    "",
-                )
-
-                return Response(
-                    {"success": True, "message": "signup.subscriptionFailed"}
-                )
-
-            else:
-                request.user.log_event(
-                    f"Failed to create subscription in Stripe with status {new_subscription.status}.",
-                    "stripe",
-                    "",
-                )
-                return Response({"success": True})
-
-        except KeyError as e:
-            capture_exception(e)
-            return new_subscription or e
+        return self.settle_subscription(request, new_subscription, new_plan)
 
 
 class CanSignup(APIView):
@@ -377,14 +425,21 @@ class AssignAccessCard(APIView):
 
     def post(self, request):
         profile = request.user.profile
-        access_card = request.data["accessCard"]
+        access_card = request.data.get("accessCard")
+
+        if not isinstance(access_card, str) or not access_card.strip():
+            return Response(
+                {"success": False, "error": "accessCardRequired"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        access_card = access_card.strip()
 
         # Profile.rfid is unique, so a clash used to surface as an unhandled
         # IntegrityError. Note this still does not verify that the member
         # actually holds the card they are claiming — see AssignAccessCard in
         # tests/test_signup_pipeline.py.
         clash = Profile.objects.filter(rfid=access_card).exclude(pk=profile.pk)
-        if access_card and clash.exists():
+        if clash.exists():
             return Response(
                 {"success": False, "error": "accessCardInUse"},
                 status=status.HTTP_400_BAD_REQUEST,
@@ -412,7 +467,7 @@ class CheckInductionStatus(APIView):
             activities = moodle_get_course_activity_completion_status(
                 config.MOODLE_INDUCTION_COURSE_ID, user_id
             )
-            score = activities["percentage_completed"]
+            score = (activities or {}).get("percentage_completed") or 0
 
         elif config.CANVAS_INDUCTION_ENABLED:
             try:
@@ -442,7 +497,7 @@ class CheckInductionStatus(APIView):
         except Exception as e:
             capture_exception(e)
             logger.error(e)
-            return Response({"success": False, "score": 0, "error": str(e)})
+            return Response({"success": False, "score": 0})
 
 
 class CompleteSignup(StripeAPIView):
@@ -506,9 +561,21 @@ class SubscriptionInfo(StripeAPIView):
             return Response({"success": False})
 
         else:
-            s = stripe.Subscription.retrieve(
-                request.user.profile.stripe_subscription_id,
-            )
+            try:
+                s = stripe.Subscription.retrieve(
+                    request.user.profile.stripe_subscription_id,
+                )
+            except stripe.error.InvalidRequestError as e:
+                capture_exception(e)
+                if e.http_status == 404:
+                    # Stripe no longer has it; the page should still load.
+                    return Response({"success": False})
+                raise
+            except stripe.error.StripeError as e:
+                capture_exception(e)
+                return Response(
+                    {"success": False}, status=status.HTTP_503_SERVICE_UNAVAILABLE
+                )
 
             if s:
                 subscription = {
@@ -532,7 +599,13 @@ class PaymentPlanResumeCancel(StripeAPIView):
 
     def post(self, request, resume):
         current_plan = request.user.profile.membership_plan
-        resume = True if resume == "resume" else False
+
+        if resume not in ("resume", "cancel"):
+            return Response(
+                {"success": False, "message": "paymentPlan.invalidAction"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        resume = resume == "resume"
 
         if not current_plan:
             request.user.log_event(
@@ -556,45 +629,9 @@ class PaymentPlanResumeCancel(StripeAPIView):
                 if isinstance(new_subscription, Response):
                     return new_subscription
 
-                try:
-                    if new_subscription.status == "active":
-                        request.user.profile.stripe_subscription_id = (
-                            new_subscription.id
-                        )
-                        request.user.profile.subscription_status = "active"
-                        request.user.profile.save()
-
-                        request.user.log_event(
-                            "Successfully created subscription in Stripe.",
-                            "stripe",
-                            "",
-                        )
-
-                        return Response({"success": True})
-
-                    elif new_subscription.status == "incomplete":
-                        # if we got here, that means the subscription wasn't successfully created
-                        request.user.log_event(
-                            f"Failed to create subscription in Stripe with status {new_subscription.status}.",
-                            "stripe",
-                            "",
-                        )
-
-                        return Response(
-                            {"success": True, "message": "signup.subscriptionFailed"}
-                        )
-
-                    else:
-                        request.user.log_event(
-                            f"Failed to create subscription in Stripe with status {new_subscription.status}.",
-                            "stripe",
-                            "",
-                        )
-                        return Response({"success": True})
-
-                except KeyError as e:
-                    capture_exception(e)
-                    return new_subscription or e
+                return PaymentPlanSignup().settle_subscription(
+                    request, new_subscription, current_plan
+                )
 
             elif resume:
                 modified_subscription = stripe.Subscription.modify(
@@ -636,6 +673,17 @@ class PaymentPlanResumeCancel(StripeAPIView):
                         subject,
                         "stripe",
                     )
+
+            elif not request.user.profile.stripe_subscription_id:
+                # A plan assigned by hand has no Stripe subscription to cancel.
+                request.user.log_event(
+                    "Member tried to cancel a plan that has no Stripe subscription.",
+                    "stripe",
+                )
+                return Response(
+                    {"success": False, "message": "paymentPlan.notExists"},
+                    status=status.HTTP_404_NOT_FOUND,
+                )
 
             else:
                 modified_subscription = stripe.Subscription.modify(
@@ -734,11 +782,6 @@ class StripeWebhook(StripeAPIView):
 
         except (Profile.DoesNotExist, Profile.MultipleObjectsReturned) as e:
             capture_exception(e)
-            return Response()
-
-        # Just in case the linked Stripe account also processes other payments we should just ignore a non existent
-        # customer.
-        if not member_profile:
             return Response()
 
         if event_type == "invoice.paid":
