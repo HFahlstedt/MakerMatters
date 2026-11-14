@@ -32,17 +32,8 @@ rather than a patch, or because nobody has asked yet:
   reveals whether an address is registered, and 500s on an unknown token in the
   branch that changes the password; kiosk login ignores member state; repeated
   failed logins by an unverified member mint unbounded verification tokens.
-- `/api/tools/issue/` reads `title` and `description` out of the body before
-  validating (a 500 on an absent one), cannot detect an empty description
-  because the member's name is prepended first, and writes its audit entry
-  before attempting delivery — so a report that failed every integration and
-  answered 500 is still logged as submitted.
-- The issue reporter's integrations, in `test_issue_integrations.py`. A blank
-  or non-numeric Vikunja label or project id is a `ValueError` before anything
-  is sent, although the label is documented as optional and ships blank.
-  Neither Vikunja nor Trello requests set a timeout. A Discord failure other
-  than a read timeout escapes the view, the one leg outside a `try`. Whether
-  one failing leg should make the whole report a 500, when the others
+- The issue reporter, in `test_member_tools.py` and `test_issue_integrations.py`.
+  Whether one failing leg should make the whole report a 500, when the others
   delivered and a retry duplicates them, is a decision.
 - The memberbucks balance list's circulation total silently excludes balances
   of 1,000 or more, while the per-member list beside it does not. The threshold

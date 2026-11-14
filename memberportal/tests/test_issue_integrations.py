@@ -191,46 +191,71 @@ def test_a_label_request_that_raises_does_not_fail_the_report(
     assert reporter.post(URL, REPORT, format="json").status_code == 201
 
 
+def test_a_blank_vikunja_label_is_optional_as_documented(
+    reporter, network, vikunja, set_config
+):
+    """Used to raise ``ValueError``: ``int("")`` ran above the ``try``.
+
+    The label is documented as ``[optional]`` and ships as ``""``, so a space
+    that filled in the project and left the label blank -- what the admin page
+    invites -- had every report fail before Vikunja was contacted. The task is
+    now created and simply not labelled.
+    """
+    set_config(VIKUNJA_DEFAULT_LABEL_ID="")
+    network.answer("PUT", "/projects/7/tasks", Reply(201, {"id": 55}))
+
+    response = reporter.post(URL, REPORT, format="json")
+
+    assert response.status_code == 201
+    assert [c[1].rsplit("/", 1)[-1] for c in network.calls] == ["tasks"]
+
+
 @pytest.mark.parametrize(
     "setting, value",
     [
-        ("VIKUNJA_DEFAULT_LABEL_ID", ""),
         ("VIKUNJA_DEFAULT_LABEL_ID", "urgent"),
         ("VIKUNJA_DEFAULT_PROJECT_ID", "inbox"),
     ],
 )
-def test_a_blank_or_non_numeric_vikunja_id_raises_instead_of_failing_cleanly(
-    reporter, network, vikunja, set_config, setting, value
+def test_a_non_numeric_vikunja_id_fails_the_leg_and_not_the_other_legs(
+    reporter, network, vikunja, set_config, setting, value, sent_emails
 ):
-    """DEFECT, pinned: ``int(...)`` runs above the ``try``, on settings text.
+    """Used to raise ``ValueError`` out of the view, before the other legs ran.
 
-    The label is documented as ``[optional]`` and ships as ``""``, so a space
-    that fills in the project and leaves the label blank -- exactly what the
-    admin page invites -- makes every report a ``ValueError`` and a 500, before
-    Vikunja is contacted and before the Trello, email and Discord legs get a
-    turn. A non-numeric project id does the same.
+    A setting that is not a number is a misconfiguration, so the report is
+    still answered 500, but the Vikunja leg now fails like any other and the
+    email goes out.
     """
-    set_config(**{setting: value})
+    set_config(
+        **{setting: value}, REPORT_ISSUE_ENABLE_EMAIL=True, EMAIL_ADMIN="a@example.com"
+    )
 
-    with pytest.raises(ValueError):
-        reporter.post(URL, REPORT, format="json")
+    response = reporter.post(URL, REPORT, format="json")
 
+    assert response.status_code == 500
     assert network.calls == []
+    assert len(sent_emails) == 1
 
 
-def test_the_vikunja_and_trello_requests_have_no_timeout(
-    reporter, network, vikunja, set_config
+def test_the_vikunja_and_trello_requests_have_a_timeout(
+    reporter, network, vikunja, trello, set_config
 ):
-    """DEFECT, pinned: neither integration passes ``timeout=``.
+    """Used to have none: ``requests`` waits forever by default, so a server
+    that accepted the connection and never answered held the member's request,
+    and a worker, until the proxy gave up."""
+    from django.conf import settings
 
-    ``requests`` waits forever by default, so a Vikunja or Trello that accepts
-    the connection and never answers holds the member's request, and a worker,
-    until the proxy gives up.
-    """
+    set_config(REPORT_ISSUE_ENABLE_VIKUNJA=True)
     vikunja_ok(network)
+    network.answer("POST", "/1/cards", Reply(200, {"shortUrl": "https://trello.com/c/x"}))
+
     reporter.post(URL, REPORT, format="json")
 
-    assert all("timeout" not in kwargs for _method, _url, kwargs in network.calls)
+    assert len(network.calls) == 3
+    assert all(
+        kwargs.get("timeout") == settings.REQUEST_TIMEOUT
+        for _method, _url, kwargs in network.calls
+    )
 
 
 # --------------------------------------------------------------------------
@@ -348,18 +373,18 @@ def test_the_discord_message_carries_the_links(
     )
 
 
-def test_a_discord_failure_escapes_the_view_unhandled(
-    reporter, network, set_config, monkeypatch
+def test_a_discord_failure_is_a_500_after_the_other_legs_ran(
+    reporter, network, set_config, monkeypatch, sent_emails
 ):
-    """DEFECT, pinned: the Discord leg is the only one outside a ``try``.
+    """Used to escape the view: Discord was the only leg outside a ``try``.
 
-    ``post_reported_issue_to_discord`` swallows a read timeout and nothing
-    else, so a refused connection raises out of the view -- a 500 with no
-    ``failed`` bookkeeping, after the email, task and card have all been
-    delivered.
+    ``post_reported_issue_to_discord`` swallows a read timeout and nothing else,
+    so a refused connection raised out of the view after the email had been
+    delivered. It is now handled like the other legs: logged, and a 500.
     """
     set_config(
-        REPORT_ISSUE_ENABLE_EMAIL=False,
+        REPORT_ISSUE_ENABLE_EMAIL=True,
+        EMAIL_ADMIN="a@example.com",
         REPORT_ISSUE_ENABLE_DISCORD=True,
         ENABLE_DISCORD_INTEGRATION=True,
         DISCORD_REPORT_ISSUE_WEBHOOK="https://discord.example/hook",
@@ -370,8 +395,10 @@ def test_a_discord_failure_escapes_the_view_unhandled(
 
     monkeypatch.setattr(requests, "post", _refused)
 
-    with pytest.raises(requests.ConnectionError):
-        reporter.post(URL, REPORT, format="json")
+    response = reporter.post(URL, REPORT, format="json")
+
+    assert response.status_code == 500
+    assert len(sent_emails) == 1
 
 
 # --------------------------------------------------------------------------

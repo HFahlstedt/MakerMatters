@@ -452,51 +452,55 @@ def test_an_empty_title_is_rejected(as_member, make_member, integrations_off):
     assert response.status_code == 400
 
 
-def test_an_empty_description_is_accepted(as_member, make_member, integrations_off):
-    """DEFECT, pinned: the guard cannot see an empty description.
+@pytest.mark.parametrize("description", ["", "   ", None])
+def test_an_empty_description_is_rejected(
+    as_member, make_member, integrations_off, description
+):
+    """Used to be accepted: the guard could not see an empty description.
 
-    ``if not (title and description)`` runs after ``description`` has been
-    replaced by ``request.user.profile.get_full_name() + ": " + body[...]``,
-    which is non-empty whatever the member typed. Only the title is really
-    checked; an issue with no body sails through to every integration.
+    ``if not (title and description)`` ran after ``description`` had been
+    replaced by ``get_full_name() + ": " + body[...]``, which is non-empty
+    whatever the member typed, so an issue with no body sailed through to every
+    integration. The check is now on what was typed.
     """
     member = make_member(state="active", rfid="ISSUE-3")
 
     response = as_member(member).post(
-        "/api/tools/issue/", {"title": "Something", "description": ""}, format="json"
+        "/api/tools/issue/",
+        {"title": "Something", "description": description},
+        format="json",
     )
 
-    assert response.status_code == 201
+    assert response.status_code == 400
+    assert response.json() == {
+        "success": False,
+        "message": "A title and a description are required.",
+    }
 
 
 @pytest.mark.parametrize("missing", ["title", "description"])
-def test_a_missing_field_raises_instead_of_returning_400(
-    as_member, make_member, integrations_off, missing
-):
-    """DEFECT, pinned: ``body["title"]`` is read before anything is validated.
+def test_a_missing_field_is_a_400(as_member, make_member, integrations_off, missing):
+    """Used to raise ``KeyError``: ``body["title"]`` was read before validation.
 
-    The endpoint has a 400 branch, but both fields are indexed out of the
-    request body above it, so an absent one is a ``KeyError`` -- a 500 to the
-    caller. The same shape as the registration endpoint, pinned in
-    ``test_auth_and_session.py``.
+    The endpoint had a 400 branch, but both fields were indexed out of the
+    request body above it, so an absent one was a 500 to the caller.
     """
     member = make_member(state="active", rfid=f"ISSUE-4-{missing}")
     payload = {"title": "T", "description": "D"}
     del payload[missing]
 
-    with pytest.raises(KeyError, match=missing):
-        as_member(member).post("/api/tools/issue/", payload, format="json")
+    response = as_member(member).post("/api/tools/issue/", payload, format="json")
+
+    assert response.status_code == 400
 
 
-def test_a_failed_delivery_is_still_logged_as_a_submitted_issue(
-    as_member, make_member, set_config
-):
-    """DEFECT, pinned: the audit entry is written before anything is attempted.
+def test_a_failed_delivery_is_logged_as_failed(as_member, make_member, set_config):
+    """Used to be logged as a submitted issue before anything was attempted.
 
-    ``request.user.log_event("Submitted issue: ...")`` runs above every
-    integration, so the member's log says they reported an issue even when
-    all of them failed and the endpoint answered 500. Nothing distinguishes
-    a delivered report from a lost one afterwards.
+    ``log_event("Submitted issue: ...")`` ran above every integration, so the
+    member's log said they reported an issue even when all of them failed and
+    the endpoint answered 500. The entry is now written once the outcome is
+    known and says which it was.
 
     Trello is switched on here with no network available, which is what the
     autouse ``block_outbound_http`` fixture turns into a failure.
@@ -513,8 +517,11 @@ def test_a_failed_delivery_is_still_logged_as_a_submitted_issue(
     )
 
     assert response.status_code == 500
-    (event,) = UserEventLog.objects.filter(description__startswith="Submitted issue")
-    assert event.description.startswith("Submitted issue: Lost report")
+    (event,) = UserEventLog.objects.filter(description__contains="Lost report")
+    assert event.description.startswith("Failed to deliver issue: Lost report")
+    assert not UserEventLog.objects.filter(
+        description__startswith="Submitted issue"
+    ).exists()
 
 
 def test_a_failed_email_answers_500(as_member, make_member, set_config, monkeypatch):

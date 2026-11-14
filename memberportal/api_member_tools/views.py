@@ -7,6 +7,7 @@ from services import discord
 
 from random import shuffle
 import requests
+from django.conf import settings
 from django.utils import timezone
 from rest_framework import status, permissions
 from rest_framework.response import Response
@@ -114,28 +115,38 @@ class IssueDetail(APIView):
 
     def post(self, request):
         body = request.data
-        title = body["title"]
-        description = request.user.profile.get_full_name() + ": " + body["description"]
+        title = body.get("title")
+        typed_description = body.get("description")
+
+        # Validate what the member typed. The reporter's name is prepended to
+        # the description below, which used to make an empty one look filled in.
+        if (
+            not isinstance(title, str)
+            or not title.strip()
+            or not isinstance(typed_description, str)
+            or not typed_description.strip()
+        ):
+            return Response(
+                {"success": False, "message": "A title and a description are required."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        title = title.strip()
+        description = request.user.profile.get_full_name() + ": " + typed_description
         vikunja_task_url = None
         trello_card_url = None
 
-        if not (title and description):
-            return Response(status=status.HTTP_400_BAD_REQUEST)
-
         failed = False
-
-        request.user.log_event(
-            "Submitted issue: " + title + " Content: " + description,
-            "generic",
-        )
 
         if config.REPORT_ISSUE_ENABLE_VIKUNJA and bool(
             config.VIKUNJA_DEFAULT_PROJECT_ID
         ):
-            vikunja_project_id = int(config.VIKUNJA_DEFAULT_PROJECT_ID)
-            vikunja_label_id = int(config.VIKUNJA_DEFAULT_LABEL_ID)
-
             try:
+                vikunja_project_id = int(config.VIKUNJA_DEFAULT_PROJECT_ID)
+                # The label is documented as optional and ships blank.
+                label_setting = str(config.VIKUNJA_DEFAULT_LABEL_ID).strip()
+                vikunja_label_id = int(label_setting) if label_setting else None
+
                 task_body = {
                     "max_right": None,
                     "id": 0,
@@ -205,6 +216,7 @@ class IssueDetail(APIView):
                     f"{config.VIKUNJA_API_URL}/api/v1/projects/{vikunja_project_id}/tasks",
                     json=task_body,
                     headers={"Authorization": "Bearer " + config.VIKUNJA_API_TOKEN},
+                    timeout=settings.REQUEST_TIMEOUT,
                 )
 
                 if (vikunja_label_id is not None) and (
@@ -226,6 +238,7 @@ class IssueDetail(APIView):
                             headers={
                                 "Authorization": "Bearer " + config.VIKUNJA_API_TOKEN
                             },
+                            timeout=settings.REQUEST_TIMEOUT,
                         )
 
                         if label_response.status_code != 201:
@@ -268,7 +281,12 @@ class IssueDetail(APIView):
                     "token": trello_token,
                 }
 
-                response = requests.request("POST", trello_url, params=querystring)
+                response = requests.request(
+                    "POST",
+                    trello_url,
+                    params=querystring,
+                    timeout=settings.REQUEST_TIMEOUT,
+                )
 
                 if response.status_code != 200:
                     failed = True
@@ -303,12 +321,27 @@ class IssueDetail(APIView):
 
         # discord report
         if config.REPORT_ISSUE_ENABLE_DISCORD:
-            username = request.user.profile.get_full_name()
-            description = body["description"]
+            try:
+                discord.post_reported_issue_to_discord(
+                    request.user.profile.get_full_name(),
+                    title,
+                    typed_description,
+                    vikunja_task_url,
+                    trello_card_url,
+                )
+            except Exception:
+                failed = True
+                logger.exception("Failed to post reported issue to Discord.")
 
-            discord.post_reported_issue_to_discord(
-                username, title, description, vikunja_task_url, trello_card_url
-            )
+        # Logged once the outcome is known, so the member's record says whether
+        # the report went anywhere.
+        request.user.log_event(
+            ("Failed to deliver issue: " if failed else "Submitted issue: ")
+            + title
+            + " Content: "
+            + description,
+            "generic",
+        )
 
         if failed:
             return Response(status=status.HTTP_500_INTERNAL_SERVER_ERROR)
