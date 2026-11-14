@@ -31,6 +31,20 @@ rather than a patch, or because nobody has asked yet:
   endpoint reveals whether an address is registered, and kiosk login ignores
   member state. Also the two serializations of one profile
   (`test_the_two_profile_serializations_disagree`), which is an API decision.
+- The outbound services, in `test_services.py`. Moodle and Canvas requests set no
+  timeout. Discord and Slack catch only `ReadTimeout`, so a refused connection
+  raises out of a door swipe's logging. With SMS on, a member with no phone
+  number cannot be deactivated or activated (the text is sent before the state
+  changes, and after the email), and any Twilio error does the same. A Moodle
+  course with no activities divides by zero, a Moodle error document is a
+  `TypeError`, and an email address containing `+` or `&` is put into the query
+  string unescaped, so `a+b@example.com` is never found. A Canvas course that
+  does not exist, or an enrolment with no user or grades, is a `TypeError` /
+  `AttributeError`. `SMS()` raises if `SMS_MESSAGES` is not valid JSON. The
+  skipped-SMS log line names the sender where it means the recipient. Discord's
+  interlock notifier returns `None` on success, and both services post an empty
+  message for an unrecognised interlock event. `send_single_email` returns
+  `True` for an email it did not send (no key, or a suppressed recipient).
 - The issue reporter, in `test_member_tools.py` and `test_issue_integrations.py`.
   Whether one failing leg should make the whole report a 500, when the others
   delivered and a retry duplicates them, is a decision.
@@ -113,6 +127,7 @@ opens the log file at import time.
 | `test_billing_failure_paths.py` | What the billing endpoints do when Stripe, the email provider or the caller misbehaves: the failure branches of card storage, plan signup, cancel/resume, the induction check and access-card assignment. |
 | `test_api_general_gaps.py` | The edges of `api_general`: the site config's fallbacks for bad JSON, the Mailchimp leg of registration, the sign-out chat post, the kiosk model, the model-permission map and the Celery failure hook. |
 | `test_access_edges.py` | The edges of the device protocol: commands the server pushes to a connected device, interlock sessions that are unknown or belong to another device, the vending machine's unknown-product branch, the interlock rejection bookkeeping and the Celery heartbeat. |
+| `test_services.py` | The outbound integrations in `services/`: SMS, Moodle, Canvas, Discord, Slack and Postmark, and what each does when the far end is slow, down or odd. |
 | `test_issue_integrations.py` | Where a reported issue goes: the Vikunja, Trello and Discord legs of `/api/tools/issue/`, and how a failure in one affects the others and the response. |
 | `test_spacedirectory_api.py` | The SpaceAPI directory: the public open/closed document, and the endpoint a door controller or weather station uses to update state and sensors. Includes a test that posts every example in `docs/SPACEDIRECTORY.md`. |
 | `test_metrics_api.py` | The metrics pipeline end to end: the six `calculate_*` functions, the stats page, the Prometheus gauge update, and the Celery task that drives it. |
