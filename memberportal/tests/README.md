@@ -37,6 +37,13 @@ rather than a patch, or because nobody has asked yet:
   because the member's name is prepended first, and writes its audit entry
   before attempting delivery — so a report that failed every integration and
   answered 500 is still logged as submitted.
+- The issue reporter's integrations, in `test_issue_integrations.py`. A blank
+  or non-numeric Vikunja label or project id is a `ValueError` before anything
+  is sent, although the label is documented as optional and ships blank.
+  Neither Vikunja nor Trello requests set a timeout. A Discord failure other
+  than a read timeout escapes the view, the one leg outside a `try`. Whether
+  one failing leg should make the whole report a 500, when the others
+  delivered and a retry duplicates them, is a decision.
 - The memberbucks balance list's circulation total silently excludes balances
   of 1,000 or more, while the per-member list beside it does not. The threshold
   may be deliberate — to leave out test or treasurer accounts — so whether to
@@ -114,6 +121,7 @@ opens the log file at import time.
 | `test_memberbucks_api.py` | The member wallet: balance, transaction history, card top-up, portal payments, and the admin balance list. The only member-facing endpoints that move money. |
 | `test_meeting_api.py` | Admin meeting scheduling and member proxy votes — governance records that decide whose votes a member carries into a general meeting. |
 | `test_billing_failure_paths.py` | What the billing endpoints do when Stripe, the email provider or the caller misbehaves: the failure branches of card storage, plan signup, cancel/resume, the induction check and access-card assignment. |
+| `test_issue_integrations.py` | Where a reported issue goes: the Vikunja, Trello and Discord legs of `/api/tools/issue/`, and how a failure in one affects the others and the response. |
 | `test_spacedirectory_api.py` | The SpaceAPI directory: the public open/closed document, and the endpoint a door controller or weather station uses to update state and sensors. Includes a test that posts every example in `docs/SPACEDIRECTORY.md`. |
 | `test_metrics_api.py` | The metrics pipeline end to end: the six `calculate_*` functions, the stats page, the Prometheus gauge update, and the Celery task that drives it. |
 
