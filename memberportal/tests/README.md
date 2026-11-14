@@ -32,6 +32,12 @@ rather than a patch, or because nobody has asked yet:
   reveals whether an address is registered, and 500s on an unknown token in the
   branch that changes the password; kiosk login ignores member state; repeated
   failed logins by an unverified member mint unbounded verification tokens.
+- `api_general`, in `test_api_general_gaps.py`. `/api/config/` reads the version
+  from `open("../package.json")`, so it is a 500 unless the server is started
+  from `memberportal/`. Sign-out guards its Discord post with
+  `SLACK_DOOR_WEBHOOK`, so Discord-only spaces see sign-ins and no sign-outs;
+  `post_kiosk_swipe_to_slack` is imported and never called, so Slack-only spaces
+  see neither. A password-reset token that is not shaped like a UUID is a 500.
 - The issue reporter, in `test_member_tools.py` and `test_issue_integrations.py`.
   Whether one failing leg should make the whole report a 500, when the others
   delivered and a retry duplicates them, is a decision.
@@ -112,6 +118,7 @@ opens the log file at import time.
 | `test_memberbucks_api.py` | The member wallet: balance, transaction history, card top-up, portal payments, and the admin balance list. The only member-facing endpoints that move money. |
 | `test_meeting_api.py` | Admin meeting scheduling and member proxy votes — governance records that decide whose votes a member carries into a general meeting. |
 | `test_billing_failure_paths.py` | What the billing endpoints do when Stripe, the email provider or the caller misbehaves: the failure branches of card storage, plan signup, cancel/resume, the induction check and access-card assignment. |
+| `test_api_general_gaps.py` | The edges of `api_general`: the site config's fallbacks for bad JSON, the Mailchimp leg of registration, the sign-out chat post, the kiosk model, the model-permission map and the Celery failure hook. |
 | `test_issue_integrations.py` | Where a reported issue goes: the Vikunja, Trello and Discord legs of `/api/tools/issue/`, and how a failure in one affects the others and the response. |
 | `test_spacedirectory_api.py` | The SpaceAPI directory: the public open/closed document, and the endpoint a door controller or weather station uses to update state and sensors. Includes a test that posts every example in `docs/SPACEDIRECTORY.md`. |
 | `test_metrics_api.py` | The metrics pipeline end to end: the six `calculate_*` functions, the stats page, the Prometheus gauge update, and the Celery task that drives it. |
