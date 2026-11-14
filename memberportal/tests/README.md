@@ -31,6 +31,13 @@ rather than a patch, or because nobody has asked yet:
   endpoint reveals whether an address is registered, and kiosk login ignores
   member state. Also the two serializations of one profile
   (`test_the_two_profile_serializations_disagree`), which is an API decision.
+- Device sessions, in `test_access_edges.py`. An interlock session id is not
+  checked against the device that sends it, and device keys are global, so any
+  authenticated device can end (and bill) any session. A session id that does
+  not exist is an unhandled `DoesNotExist` that drops the connection after an
+  `error` packet, where an already-ended session gets `success: false`. A sync
+  pushed to a connected but unauthenticated device raises in its consumer and
+  drops it.
 - The issue reporter, in `test_member_tools.py` and `test_issue_integrations.py`.
   Whether one failing leg should make the whole report a 500, when the others
   delivered and a retry duplicates them, is a decision.
@@ -112,6 +119,7 @@ opens the log file at import time.
 | `test_meeting_api.py` | Admin meeting scheduling and member proxy votes — governance records that decide whose votes a member carries into a general meeting. |
 | `test_billing_failure_paths.py` | What the billing endpoints do when Stripe, the email provider or the caller misbehaves: the failure branches of card storage, plan signup, cancel/resume, the induction check and access-card assignment. |
 | `test_api_general_gaps.py` | The edges of `api_general`: the site config's fallbacks for bad JSON, the Mailchimp leg of registration, the sign-out chat post, the kiosk model, the model-permission map and the Celery failure hook. |
+| `test_access_edges.py` | The edges of the device protocol: commands the server pushes to a connected device, interlock sessions that are unknown or belong to another device, the vending machine's unknown-product branch, the interlock rejection bookkeeping and the Celery heartbeat. |
 | `test_issue_integrations.py` | Where a reported issue goes: the Vikunja, Trello and Discord legs of `/api/tools/issue/`, and how a failure in one affects the others and the response. |
 | `test_spacedirectory_api.py` | The SpaceAPI directory: the public open/closed document, and the endpoint a door controller or weather station uses to update state and sensors. Includes a test that posts every example in `docs/SPACEDIRECTORY.md`. |
 | `test_metrics_api.py` | The metrics pipeline end to end: the six `calculate_*` functions, the stats page, the Prometheus gauge update, and the Celery task that drives it. |
