@@ -27,17 +27,10 @@ rather than a patch, or because nobody has asked yet:
   the `if id:` branch. New kiosks are unauthorised by default, so this is not a
   login — but it is an unauthenticated write, and whether terminals should
   self-register is a deployment decision.
-- Several smaller ones pinned in `test_auth_and_session.py`: registration reads
-  `email` before checking it (a 500, not a 400); the password-reset endpoint
-  reveals whether an address is registered, and 500s on an unknown token in the
-  branch that changes the password; kiosk login ignores member state; repeated
-  failed logins by an unverified member mint unbounded verification tokens.
-- `api_general`, in `test_api_general_gaps.py`. `/api/config/` reads the version
-  from `open("../package.json")`, so it is a 500 unless the server is started
-  from `memberportal/`. Sign-out guards its Discord post with
-  `SLACK_DOOR_WEBHOOK`, so Discord-only spaces see sign-ins and no sign-outs;
-  `post_kiosk_swipe_to_slack` is imported and never called, so Slack-only spaces
-  see neither. A password-reset token that is not shaped like a UUID is a 500.
+- Two smaller ones pinned in `test_auth_and_session.py`: the password-reset
+  endpoint reveals whether an address is registered, and kiosk login ignores
+  member state. Also the two serializations of one profile
+  (`test_the_two_profile_serializations_disagree`), which is an API decision.
 - The issue reporter, in `test_member_tools.py` and `test_issue_integrations.py`.
   Whether one failing leg should make the whole report a 500, when the others
   delivered and a retry duplicates them, is a decision.

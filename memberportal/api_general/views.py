@@ -1,3 +1,4 @@
+import os
 import sentry_sdk
 from django.contrib.auth import (
     authenticate,
@@ -5,6 +6,8 @@ from django.contrib.auth import (
     logout,
 )
 import logging
+from django.conf import settings
+from django.core.exceptions import ValidationError
 from constance import config
 import json
 from django.utils import timezone
@@ -65,7 +68,7 @@ class GetConfig(APIView):
 
         keys = {"stripePublishableKey": config.STRIPE_PUBLISHABLE_KEY}
 
-        with open("../package.json") as f:
+        with open(os.path.join(settings.BASE_DIR, "..", "package.json")) as f:
             package = json.load(f)
             version = package.get("version")
 
@@ -224,6 +227,9 @@ class Login(APIView):
                     return Response(status=status.HTTP_200_OK)
 
             else:
+                # One live token per account: an earlier one is replaced, so
+                # repeated attempts neither pile up nor leave old links valid.
+                EmailVerificationToken.objects.filter(user=user).delete()
                 new_token = EmailVerificationToken.objects.create(user=user)
 
                 url = f"{config.SITE_URL}/profile/email/{new_token.verification_token}/verify/"
@@ -311,15 +317,23 @@ class ResetPassword(APIView):
 
     permission_classes = (permissions.AllowAny,)
 
+    @staticmethod
+    def find_user_by_reset_token(token):
+        """The user holding this reset token, or None for any token that is
+        unknown or not shaped like one (the column is a UUID)."""
+        try:
+            return User.objects.get(password_reset_key=token)
+        except (User.DoesNotExist, ValidationError, ValueError):
+            return None
+
     def post(self, request):
         body = request.data
 
         # If we get a reset token and no password, the token is being validated
         if body.get("token") and not body.get("password"):
-            try:
-                user = User.objects.get(password_reset_key=body.get("token"))
+            user = self.find_user_by_reset_token(body.get("token"))
 
-            except User.DoesNotExist:
+            if user is None:
                 return Response({"success": False})
 
             if (
@@ -336,7 +350,7 @@ class ResetPassword(APIView):
 
         # If we get a reset token and email, the password should be reset
         if body.get("token") and body.get("password"):
-            user = User.objects.get(password_reset_key=body.get("token"))
+            user = self.find_user_by_reset_token(body.get("token"))
 
             if (
                 user
@@ -578,8 +592,18 @@ class SiteSignIn(APIView):
         body = request.data
         guests = body.get("guests")
 
+        # Signing in twice closes the earlier session rather than leaving two
+        # open, which kept the occupancy count wrong and let one sign-out
+        # close both.
+        for open_session in SiteSession.objects.filter(
+            user=request.user, signout_date__isnull=True
+        ):
+            open_session.signout()
+
         SiteSession.objects.create(user=request.user, guests=guests)
-        post_kiosk_swipe_to_discord(request.user.profile.get_full_name(), True)
+        name = request.user.profile.get_full_name()
+        post_kiosk_swipe_to_discord(name, True)
+        post_kiosk_swipe_to_slack(name, True)
 
         for door in request.user.profile.doors.all():
             door.sync()
@@ -603,8 +627,10 @@ class SiteSignOut(APIView):
         )
         for session in sessions:
             session.signout()
-        if config.ENABLE_DISCORD_INTEGRATION and config.SLACK_DOOR_WEBHOOK:
-            post_kiosk_swipe_to_discord(request.user.profile.get_full_name(), False)
+        # Each function checks its own integration's settings.
+        name = request.user.profile.get_full_name()
+        post_kiosk_swipe_to_discord(name, False)
+        post_kiosk_swipe_to_slack(name, False)
 
         for door in request.user.profile.doors.all():
             door.sync()
@@ -649,6 +675,19 @@ class Register(APIView):
 
     def post(self, request):
         body = request.data
+        email = body.get("email")
+        screen_name = body.get("screenName")
+
+        if (
+            not isinstance(email, str)
+            or not email.strip()
+            or not isinstance(screen_name, str)
+            or not screen_name.strip()
+        ):
+            return Response(
+                {"message": "error.emailAndScreenNameRequired"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         if User.objects.filter(email=body.get("email").lower()).exists():
             return Response(

@@ -109,21 +109,23 @@ def test_an_unverified_member_cannot_log_in_and_is_re_sent_the_link(
     assert len(sent_emails) == 1
 
 
-def test_every_failed_unverified_login_mints_another_token(
+def test_failed_unverified_logins_keep_one_live_token(
     api_client, make_member, sent_emails
 ):
-    """DEFECT, pinned: nothing bounds how many tokens one account accumulates.
+    """Used to mint a fresh token on every attempt and keep them all valid.
 
-    Each attempt creates a fresh ``EmailVerificationToken`` and never expires
-    or replaces the previous one, so every token ever minted stays valid for
-    its 24 hours. Repeated attempts — a member with a saved wrong password, or
-    anyone who knows the address — grow the table without limit.
+    Each attempt created an ``EmailVerificationToken`` and never expired or
+    replaced the previous one, so every token ever minted stayed valid for its
+    24 hours and repeated attempts -- a member with a saved wrong password, or
+    anyone who knows the address -- grew the table without limit. A new token
+    now replaces the old one, which stops working.
     """
     from api_general.models import EmailVerificationToken
 
     member = make_member(state="active", rfid="LOGIN-5")
     member.user.email_verified = False
     member.user.save()
+    seen = []
 
     for _ in range(3):
         api_client.post(
@@ -131,8 +133,10 @@ def test_every_failed_unverified_login_mints_another_token(
             {"email": member.user.email, "password": PASSWORD},
             format="json",
         )
+        seen.append(EmailVerificationToken.objects.get(user=member.user).verification_token)
 
-    assert EmailVerificationToken.objects.filter(user=member.user).count() == 3
+    assert EmailVerificationToken.objects.filter(user=member.user).count() == 1
+    assert len(set(seen)) == 3
 
 
 def test_logging_in_while_already_logged_in_is_a_no_op(api_client, make_member):
@@ -435,17 +439,28 @@ def test_registering_a_duplicate_screen_name_is_a_409(
     assert response.json() == {"message": "error.screenNameAlreadyExists"}
 
 
-def test_registering_without_an_email_crashes(api_client):
-    """DEFECT, pinned: the field is read before it is checked.
+@pytest.mark.parametrize("field", ["email", "screenName"])
+@pytest.mark.parametrize("value", [None, "", "   ", 5])
+def test_registering_without_an_email_or_screen_name_is_a_400(
+    api_client, field, value
+):
+    """Used to crash: the fields were read before they were checked.
 
-    ``body.get("email").lower()`` is the first statement in the handler, so a
-    payload without an email raises ``AttributeError`` on ``None`` and returns
-    a 500 rather than a 400. The same applies to ``screenName``.
+    ``body.get("email").lower()`` was the first statement in the handler, so a
+    payload without an email (or screen name) raised ``AttributeError`` on
+    ``None`` and returned a 500 rather than a 400.
     """
-    with pytest.raises(AttributeError):
-        api_client.post(
-            "/api/register/", registration_payload(email=None), format="json"
-        )
+    from profile.models import User
+
+    before = User.objects.count()
+
+    response = api_client.post(
+        "/api/register/", registration_payload(**{field: value}), format="json"
+    )
+
+    assert response.status_code == 400
+    assert response.json() == {"message": "error.emailAndScreenNameRequired"}
+    assert User.objects.count() == before
 
 
 def test_verifying_an_email_activates_the_account_and_logs_them_in(
@@ -595,24 +610,22 @@ def test_a_token_and_password_resets_the_password(api_client, make_member, sent_
     assert refreshed.password_reset_key is None
 
 
-def test_resetting_with_an_unknown_token_crashes(api_client):
-    """DEFECT, pinned: only the validate branch catches a missing user.
+def test_resetting_with_an_unknown_token_is_not_valid(api_client):
+    """Used to crash: only the validate branch caught a missing user.
 
-    The validate-only branch wraps its lookup in ``try/except DoesNotExist``;
-    the branch that actually changes the password does not, so an unknown
-    token there is a 500 instead of the ``{"success": False}`` its sibling
-    returns.
+    The validate-only branch wrapped its lookup in ``try/except DoesNotExist``;
+    the branch that actually changes the password did not, so an unknown token
+    there was a 500 instead of the ``{"success": False}`` its sibling returned.
     """
     import uuid
 
-    from profile.models import User
+    response = api_client.post(
+        "/api/password/reset/",
+        {"token": str(uuid.uuid4()), "password": "irrelevant"},
+        format="json",
+    )
 
-    with pytest.raises(User.DoesNotExist):
-        api_client.post(
-            "/api/password/reset/",
-            {"token": str(uuid.uuid4()), "password": "irrelevant"},
-            format="json",
-        )
+    assert response.json() == {"success": False}
 
 
 # --------------------------------------------------------------------------
@@ -851,23 +864,23 @@ def test_checking_the_current_site_session(make_member, as_member):
     assert body["signout_date"] is None
 
 
-def test_signing_in_twice_leaves_two_open_sessions(make_member, as_member):
-    """DEFECT, pinned: nothing closes or rejects an existing open session.
-
-    ``SiteSession.objects.create`` is unconditional, so a member who signs in
-    twice has two open rows. ``is_signed_into_site()`` only asks whether any
-    exist, so access is unaffected — but the occupancy count that the sessions
-    exist to provide is now wrong, and one sign-out closes both.
-    """
+def test_signing_in_twice_closes_the_earlier_session(make_member, as_member):
+    """Used to leave two open rows: ``SiteSession.objects.create`` was
+    unconditional, so a member who signed in twice was counted twice in the
+    occupancy the sessions exist to provide, and one sign-out closed both."""
     from api_general.models import SiteSession
 
     member = make_member(state="active", rfid="SITE-5")
     client = as_member(member)
 
     client.post("/api/sitesessions/signin/", {"guests": "[]"}, format="json")
-    client.post("/api/sitesessions/signin/", {"guests": "[]"}, format="json")
+    client.post("/api/sitesessions/signin/", {"guests": '["a guest"]'}, format="json")
 
-    assert SiteSession.objects.filter(user=member.user, signout_date=None).count() == 2
+    sessions = SiteSession.objects.filter(user=member.user).order_by("pk")
+    assert sessions.count() == 2
+    assert sessions[0].signout_date is not None
+    assert sessions[1].signout_date is None
+    assert sessions[1].guests == '["a guest"]'
 
 
 # --------------------------------------------------------------------------

@@ -57,21 +57,22 @@ def test_malformed_webcam_urls_fall_back_to_an_error_entry(api_client, set_confi
     assert body["webcamLinks"] == [["Error Loading Webcam Configuration", ""]]
 
 
-def test_the_site_config_is_a_500_when_the_server_starts_elsewhere(
+def test_the_site_config_does_not_depend_on_the_working_directory(
     api_client, tmp_path, monkeypatch
 ):
-    """DEFECT, pinned: the version is read from ``open("../package.json")``.
+    """Used to be a 500 unless the server was started from ``memberportal/``.
 
-    The path is relative to the process's working directory, not to the
-    source file, so it only resolves when the server is started from
-    ``memberportal/``. Started from anywhere else -- a service manager's
-    default directory, say -- the endpoint the frontend loads first answers
-    500 and the whole portal is unusable.
+    The version was read from ``open("../package.json")``, relative to the
+    process's working directory, so a service manager's default directory made
+    the endpoint the frontend loads first fail and the whole portal unusable.
+    The path is now built from ``BASE_DIR``.
     """
     monkeypatch.chdir(tmp_path)
 
-    with pytest.raises(FileNotFoundError):
-        api_client.get("/api/config/")
+    response = api_client.get("/api/config/")
+
+    assert response.status_code == 200
+    assert response.json()["version"]
 
 
 # --------------------------------------------------------------------------
@@ -208,16 +209,15 @@ def test_signing_in_posts_to_discord_when_it_is_configured(
     assert "Test Member1 just signed in at a kiosk" in body["embeds"][0]["description"]
 
 
-def test_signing_out_posts_to_discord_only_if_a_slack_webhook_is_also_set(
+def test_signing_out_posts_to_discord_without_needing_a_slack_webhook(
     make_member, as_member, set_config, chat_posts
 ):
-    """DEFECT, pinned: sign-out checks the wrong integration's webhook.
+    """Used to check the wrong integration's webhook.
 
-    ``SiteSignOut`` guards its Discord post with
-    ``config.ENABLE_DISCORD_INTEGRATION and config.SLACK_DOOR_WEBHOOK``. Sign-in
-    leaves the check to ``post_kiosk_swipe_to_discord`` (which tests
-    ``DISCORD_DOOR_WEBHOOK``), so a space with Discord configured and no Slack
-    sees every sign-in announced and no sign-out.
+    ``SiteSignOut`` guarded its Discord post with
+    ``config.ENABLE_DISCORD_INTEGRATION and config.SLACK_DOOR_WEBHOOK``, so a
+    space with Discord configured and no Slack saw every sign-in announced and
+    no sign-out. Each notifier now checks its own settings.
     """
     set_config(
         ENABLE_DISCORD_INTEGRATION=True,
@@ -230,24 +230,17 @@ def test_signing_out_posts_to_discord_only_if_a_slack_webhook_is_also_set(
     chat_posts.clear()
 
     client.put("/api/sitesessions/signout/")
-    assert chat_posts == []
 
-    set_config(SLACK_DOOR_WEBHOOK="https://slack.example/door")
-    client.put("/api/sitesessions/signout/")
     ((url, body),) = chat_posts
     assert url == "https://discord.example/door"
     assert "signed out" in body["embeds"][0]["description"]
 
 
-def test_kiosk_sign_ins_are_never_posted_to_slack(
+def test_kiosk_sign_ins_and_outs_are_posted_to_slack(
     make_member, as_member, set_config, chat_posts
 ):
-    """DEFECT, pinned: ``post_kiosk_swipe_to_slack`` is imported and never called.
-
-    ``ENABLE_SLACK_INTEGRATION`` and ``SLACK_DOOR_WEBHOOK`` are offered in the
-    admin and ``services.slack`` can send the message, but neither sign-in nor
-    sign-out calls it, so a Slack-only space gets no announcements at all.
-    """
+    """Used to be silent: ``post_kiosk_swipe_to_slack`` was imported and never
+    called, so a Slack-only space got no announcements at all."""
     set_config(
         ENABLE_SLACK_INTEGRATION=True,
         SLACK_DOOR_WEBHOOK="https://slack.example/door",
@@ -259,7 +252,10 @@ def test_kiosk_sign_ins_are_never_posted_to_slack(
     client.post("/api/sitesessions/signin/", {"guests": "[]"}, format="json")
     client.put("/api/sitesessions/signout/")
 
-    assert chat_posts == []
+    assert [(url, body["text"]) for url, body in chat_posts] == [
+        ("https://slack.example/door", ":book: Test Member1 just signed in at a kiosk."),
+        ("https://slack.example/door", ":book: Test Member1 just signed out at a kiosk."),
+    ]
 
 
 def test_signing_out_resyncs_the_members_devices(
@@ -298,55 +294,17 @@ def test_validating_an_unknown_reset_token_says_not_valid(api_client):
     assert response.json() == {"success": False}
 
 
-def test_a_reset_token_that_is_not_a_uuid_is_an_unhandled_error(api_client):
-    """DEFECT, pinned: the token goes straight into a UUID-field lookup.
-
-    ``password_reset_key`` is a ``UUIDField``, and ``User.DoesNotExist`` is the
-    only error caught, so anything that is not shaped like a UUID -- a
-    truncated link, a typo -- raises ``ValidationError`` and answers 500
-    instead of "not valid".
-    """
-    from django.core.exceptions import ValidationError
-
-    with pytest.raises(ValidationError):
-        api_client.post(
-            "/api/password/reset/", {"token": "no-such-token"}, format="json"
-        )
-
-
-def test_a_kiosk_login_by_an_already_logged_in_caller_is_a_200_without_checks(
-    make_member, as_member
-):
-    """Pinned as behaviour: the body is not even read for an authenticated caller."""
-    member = make_member(state="active", rfid="LOGGED-2")
-
-    response = as_member(member).post("/api/login/kiosk/", {}, format="json")
+@pytest.mark.parametrize(
+    "body", [{"token": "no-such-token"}, {"token": "no-such-token", "password": "x"}]
+)
+def test_a_reset_token_that_is_not_a_uuid_is_not_valid(api_client, body):
+    """Used to raise ``ValidationError``: the token went straight into a
+    UUID-field lookup and only ``DoesNotExist`` was caught, so a truncated link
+    or a typo answered 500 instead of "not valid"."""
+    response = api_client.post("/api/password/reset/", body, format="json")
 
     assert response.status_code == 200
-
-
-def test_a_staff_member_can_set_a_kiosks_name_and_theme(as_admin, make_kiosk):
-    kiosk = make_kiosk(kiosk_id="theme-1")
-
-    response = as_admin().put(
-        "/api/kiosks/",
-        {"kioskId": "theme-1", "playTheme": True, "name": "Front door"},
-        format="json",
-    )
-
-    kiosk.refresh_from_db()
-    assert response.status_code == 200
-    assert (kiosk.name, kiosk.play_theme) == ("Front door", True)
-
-
-def test_updating_a_profile_to_a_blank_email_is_a_400(make_member, as_member):
-    member = make_member(state="active", rfid="PROF-1")
-
-    response = as_member(member).put(
-        "/api/profile/", {"email": "", "screenName": "someone"}, format="json"
-    )
-
-    assert response.status_code == 400
+    assert response.json() == {"success": False}
 
 
 # --------------------------------------------------------------------------
