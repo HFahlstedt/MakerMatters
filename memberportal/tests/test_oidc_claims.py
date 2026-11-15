@@ -51,10 +51,10 @@ def test_userinfo_fills_the_standard_claims_from_the_profile(make_member):
     }
 
 
-def test_userinfo_substitutes_placeholders_for_blank_fields(make_member):
-    """Blank fields become literal ``NO_*`` strings rather than being omitted,
-    so a relying party that creates an account from the claims gets a user
-    whose name is ``NO_FIRSTNAME``."""
+def test_userinfo_leaves_out_blank_fields(make_member):
+    """Used to send ``NO_FIRSTNAME``, ``NO_PHONENUMBER`` and so on, which a
+    relying party creating an account from the claims stored as real values.
+    Used also to send ``" "`` as the name, as two blank names join to a space."""
     from membermatters.oidc_provider_settings import userinfo
 
     profile = make_member(state="active")
@@ -66,14 +66,31 @@ def test_userinfo_substitutes_placeholders_for_blank_fields(make_member):
 
     claims = userinfo({}, profile.user)
 
-    assert claims["given_name"] == "NO_FIRSTNAME"
-    assert claims["family_name"] == "NO_LASTNAME"
-    assert claims["nickname"] == "NO_SCREENNAME"
-    assert claims["preferred_username"] == "NO_SCREENNAME"
-    assert claims["phone_number"] == "NO_PHONENUMBER"
-    # ``get_full_name`` of two blanks is a single space, which is truthy, so
-    # the ``NO_NAME`` fallback can never be reached.
-    assert claims["name"] == " "
+    for claim in (
+        "name",
+        "given_name",
+        "family_name",
+        "nickname",
+        "preferred_username",
+        "phone_number",
+    ):
+        assert claim not in claims
+    assert claims["email"] == profile.user.email
+
+
+def test_userinfo_leaves_out_only_the_blank_fields(make_member):
+    from membermatters.oidc_provider_settings import userinfo
+
+    profile = make_member(state="active")
+    profile.last_name = ""
+    profile.phone = ""
+    profile.save()
+
+    claims = userinfo({}, profile.user)
+
+    assert claims["given_name"] == "Test"
+    assert claims["name"] == "Test"
+    assert "family_name" not in claims
 
 
 def test_phone_numbers_are_never_reported_as_verified(make_member):
@@ -239,15 +256,14 @@ def test_invalid_vikunja_teams_json_adds_no_claim_and_logs(
     assert len(errors) == 1
 
 
-def test_a_non_list_vikunja_teams_value_is_passed_through_unchecked(
-    make_member, set_config
-):
-    """Pinned as behaviour: valid JSON of any shape is handed to the relying
-    party as ``vikunja_groups``; only syntax is checked."""
-    set_config(VIKUNJA_TEAMS='{"a": 1}')
+@pytest.mark.parametrize("value", ['{"a": 1}', '"members"', "3", "null"])
+def test_a_non_list_vikunja_teams_value_adds_no_claim(make_member, set_config, value):
+    """Used to be passed to the relying party as ``vikunja_groups``; only the
+    JSON syntax was checked."""
+    set_config(VIKUNJA_TEAMS=value)
     profile = make_member(state="active")
 
-    assert claims_for(profile.user, ["vikunja_teams"]) == {"vikunja_groups": {"a": 1}}
+    assert claims_for(profile.user, ["vikunja_teams"]) == {}
 
 
 # --------------------------------------------------------------------------

@@ -37,13 +37,10 @@ rather than a patch, or because nobody has asked yet:
   if `SMS_MESSAGES` is not valid JSON. `send_single_email` returns `True` for an
   email it did not send (no key, or a suppressed recipient), so callers that
   check the result can never see that as a failure.
-- The OIDC claims, in `test_oidc_claims.py`. Blank profile fields are sent to
-  relying parties as literal `NO_FIRSTNAME`, `NO_SCREENNAME`, `NO_PHONENUMBER`
-  and so on, so an account created from the claims gets those as real values;
-  the `NO_NAME` fallback can never fire, because two blank names join to a
-  single space. The discovery document has no `scopes_supported`, so the custom
-  scopes are not discoverable. `VIKUNJA_TEAMS` is only checked for being valid
-  JSON, not for being a list.
+- The OIDC discovery document, in `test_oidc_claims.py`, has no
+  `scopes_supported`, so the custom scopes (`membershipinfo`, `vikunja_teams`)
+  are not discoverable. Adding them means overriding the library's view, so it
+  is left as-is until someone needs it.
 - The issue reporter, in `test_member_tools.py` and `test_issue_integrations.py`.
   Whether one failing leg should make the whole report a 500, when the others
   delivered and a retry duplicates them, is a decision.
