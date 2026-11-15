@@ -1,4 +1,5 @@
 from constance import config
+from django.conf import settings
 import requests
 import math
 
@@ -38,13 +39,22 @@ def moodle_get_course_activity_completion_status(course_id: str, user_id: str):
         + f"&courseid={course_id}&userid={user_id}"
     )
 
-    course_activities_data = requests.get(course_activities_url).json()
+    course_activities_data = requests.get(
+        course_activities_url, timeout=settings.REQUEST_TIMEOUT
+    ).json()
 
-    total_course_activities = len(course_activities_data.get("statuses"))
+    statuses = course_activities_data.get("statuses")
+    if statuses is None:
+        raise RuntimeError(
+            "Moodle did not return activity statuses: "
+            + str(course_activities_data.get("message") or course_activities_data)
+        )
+
+    total_course_activities = len(statuses)
     completed_course_activities = []
     incomplete_course_activities = []
 
-    for activity in course_activities_data.get("statuses"):
+    for activity in statuses:
         activity_status = get_moodle_completion_state(activity["state"])
 
         if activity_status in ("complete", "complete_pass", "complete_fail"):
@@ -56,19 +66,22 @@ def moodle_get_course_activity_completion_status(course_id: str, user_id: str):
         "total_course_activities": total_course_activities,
         "completed_course_activities": len(completed_course_activities),
         "incomplete_course_activities": len(incomplete_course_activities),
-        "percentage_completed": math.floor(
-            (len(completed_course_activities) / total_course_activities) * 100
+        "percentage_completed": (
+            math.floor(
+                (len(completed_course_activities) / total_course_activities) * 100
+            )
+            if total_course_activities
+            else 0
         ),
     }
 
 
 def moodle_get_user_from_email(user_email: str):
-    user_data_url = (
-        get_moodle_url("core_user_get_users_by_field")
-        + f"&field=email&values[0]={user_email}"
-    )
-
-    user_data = requests.get(user_data_url).json()
+    user_data = requests.get(
+        get_moodle_url("core_user_get_users_by_field"),
+        params={"field": "email", "values[0]": user_email},
+        timeout=settings.REQUEST_TIMEOUT,
+    ).json()
 
     if len(user_data) > 1:
         raise RuntimeError("Multiple users found with email: " + user_email)

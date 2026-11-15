@@ -50,7 +50,9 @@ def post_door_swipe_to_slack(name, door, status):
 
         try:
             requests.post(url, json=json_message, timeout=settings.REQUEST_TIMEOUT)
-        except requests.exceptions.ReadTimeout:
+        except requests.exceptions.RequestException as e:
+            # A chat outage must never break the work that announced it.
+            logger.warning("Could not post to %s: %s", "slack", e)
             return True
 
     return True
@@ -67,7 +69,9 @@ def post_door_bump_to_slack(name, door):
 
         try:
             requests.post(url, json=json_message, timeout=settings.REQUEST_TIMEOUT)
-        except requests.exceptions.ReadTimeout:
+        except requests.exceptions.RequestException as e:
+            # A chat outage must never break the work that announced it.
+            logger.warning("Could not post to %s: %s", "slack", e)
             return True
 
     return True
@@ -131,13 +135,18 @@ def post_interlock_swipe_to_slack(name, interlock, type, time=None):
                 }
             )
 
-        try:
-            requests.post(url, json=json_message, timeout=settings.REQUEST_TIMEOUT)
-        except requests.exceptions.ReadTimeout:
+        else:
+            logger.warning("Unrecognised interlock event %r, not posting", type)
             return True
 
-    else:
-        return True
+        try:
+            requests.post(url, json=json_message, timeout=settings.REQUEST_TIMEOUT)
+        except requests.exceptions.RequestException as e:
+            # A chat outage must never break the work that announced it.
+            logger.warning("Could not post to %s: %s", "slack", e)
+            return True
+
+    return True
 
 
 def post_kiosk_swipe_to_slack(name, sign_in):
@@ -155,7 +164,9 @@ def post_kiosk_swipe_to_slack(name, sign_in):
 
         try:
             requests.post(url, json=json_message, timeout=settings.REQUEST_TIMEOUT)
-        except requests.exceptions.ReadTimeout:
+        except requests.exceptions.RequestException as e:
+            # A chat outage must never break the work that announced it.
+            logger.warning("Could not post to %s: %s", "slack", e)
             return True
 
     return True

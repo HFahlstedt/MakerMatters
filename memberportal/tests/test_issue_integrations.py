@@ -378,10 +378,34 @@ def test_a_discord_failure_is_a_500_after_the_other_legs_ran(
 ):
     """Used to escape the view: Discord was the only leg outside a ``try``.
 
-    ``post_reported_issue_to_discord`` swallows a read timeout and nothing else,
-    so a refused connection raised out of the view after the email had been
-    delivered. It is now handled like the other legs: logged, and a 500.
+    Discord was the only leg outside a ``try``, so an exception raised out of
+    the view after the email had been delivered. It is now handled like the
+    other legs: logged, and a 500. (The notifier itself now swallows network
+    errors, so this guards against any other exception escaping it.)
     """
+    set_config(
+        REPORT_ISSUE_ENABLE_EMAIL=True,
+        EMAIL_ADMIN="a@example.com",
+        REPORT_ISSUE_ENABLE_DISCORD=True,
+        ENABLE_DISCORD_INTEGRATION=True,
+        DISCORD_REPORT_ISSUE_WEBHOOK="https://discord.example/hook",
+    )
+
+    def _broken(*args, **kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr("services.discord.post_reported_issue_to_discord", _broken)
+
+    response = reporter.post(URL, REPORT, format="json")
+
+    assert response.status_code == 500
+    assert len(sent_emails) == 1
+
+
+def test_a_discord_outage_does_not_fail_the_report(
+    reporter, network, set_config, monkeypatch, sent_emails
+):
+    """The notifier swallows network errors, so the report still succeeds."""
     set_config(
         REPORT_ISSUE_ENABLE_EMAIL=True,
         EMAIL_ADMIN="a@example.com",
@@ -397,7 +421,7 @@ def test_a_discord_failure_is_a_500_after_the_other_legs_ran(
 
     response = reporter.post(URL, REPORT, format="json")
 
-    assert response.status_code == 500
+    assert response.status_code == 201
     assert len(sent_emails) == 1
 
 

@@ -105,16 +105,11 @@ def test_a_disabled_sms_service_sends_nothing_and_says_so_in_the_recipients_log(
     assert entry.data == "hi"
 
 
-def test_the_skipped_sms_log_names_the_sender_where_it_means_the_recipient(
-    make_member, set_config
-):
-    """DEFECT, pinned: the second log line is built from the wrong person.
+def test_the_skipped_sms_log_names_the_recipient(make_member, set_config):
+    """Used to name the sender in the recipient's log.
 
-    When both an admin (sender) and a member (recipient) are given and SMS is
-    off, the recipient's log gets
-    ``"Skipped sending SMS to <sender's name> because SMS is turned off."`` --
-    the *sender's* name, in the *recipient's* log. The enabled path, a few
-    lines below, names them the right way round.
+    With SMS off and both an admin (sender) and a member (recipient) given, the
+    sender's log says who the message was meant for, mirroring the enabled path.
     """
     from profile.models import UserEventLog
     from services.sms import SMS
@@ -127,9 +122,12 @@ def test_the_skipped_sms_log_names_the_sender_where_it_means_the_recipient(
 
     names = [
         e.description
-        for e in UserEventLog.objects.filter(user=recipient.user, logtype="sms")
+        for e in UserEventLog.objects.filter(user=sender.user, logtype="sms")
     ]
-    assert f"Skipped sending SMS to {sender.user.get_full_name()} because SMS is turned off." in names
+    assert (
+        f"Skipped sending SMS to {recipient.user.get_full_name()} because SMS is turned off."
+        in names
+    )
 
 
 def test_an_enabled_sms_service_adds_the_country_code_and_footer(twilio, set_config):
@@ -221,44 +219,50 @@ def test_malformed_sms_messages_make_the_service_unconstructable(set_config):
         SMS()
 
 
-def test_deactivating_a_member_with_no_phone_number_fails_with_sms_on(
+def test_deactivating_a_member_with_no_phone_number_still_deactivates(
     twilio, make_member, sent_emails
 ):
-    """DEFECT, pinned: a blank phone number blocks deactivation.
+    """Used to fail: a blank phone number blocked deactivation.
 
-    ``phone`` is optional (``blank=True``), and ``Profile.deactivate`` texts
-    the member *before* it sets ``state = "inactive"``. With SMS switched on,
-    ``SMS._send`` rejects the blank number with ``RuntimeError``, so the
-    member stays active: the committee's deactivate button fails, and so does
-    the ``customer.subscription.deleted`` webhook that is meant to cut off a
-    member whose payment lapsed. Worse, the "your access has been turned off"
-    email has already gone, so the member is told they are deactivated while
-    their tags still open the door. ``activate`` has the same shape.
+    ``phone`` is optional, and ``SMS._send`` rejects a blank number. The state
+    change is now made first and the notifications are best effort, so the
+    committee's button and the ``customer.subscription.deleted`` webhook work.
     """
     member = make_member(state="active", rfid="SMS-NOPHONE")
     member.phone = ""
     member.save()
 
-    with pytest.raises(RuntimeError, match="less than 10"):
-        member.deactivate()
+    assert member.deactivate() is True
 
     member.refresh_from_db()
-    assert member.state == "active"
+    assert member.state == "inactive"
     assert len(sent_emails) == 1
 
 
-def test_a_twilio_failure_also_blocks_deactivation(twilio, make_member, sent_emails):
-    """The same ordering means any SMS provider outage does too."""
+def test_activating_a_member_with_no_phone_number_still_activates(
+    twilio, make_member, sent_emails
+):
+    member = make_member(state="inactive", rfid="SMS-NOPHONE2")
+    member.phone = ""
+    member.save()
+
+    assert member.activate() is True
+
+    member.refresh_from_db()
+    assert member.state == "active"
+
+
+def test_a_twilio_failure_does_not_block_deactivation(twilio, make_member, sent_emails):
+    """Used to: any SMS provider outage stopped the deactivation."""
     member = make_member(state="active", rfid="SMS-DOWN")
     member.phone = "0400000000"
     member.save()
     twilio.fail = RuntimeError("Twilio is down")
 
-    with pytest.raises(RuntimeError, match="Twilio is down"):
-        member.deactivate()
+    assert member.deactivate() is True
 
     member.refresh_from_db()
-    assert member.state == "active"
+    assert member.state == "inactive"
 
 
 # --------------------------------------------------------------------------
@@ -325,25 +329,26 @@ def test_a_failed_activity_still_counts_as_completed(moodle, net):
     ] == 100
 
 
-def test_a_course_with_no_activities_divides_by_zero(moodle, net):
-    """DEFECT, pinned: ``completed / total`` with ``total == 0``."""
+def test_a_course_with_no_activities_is_zero_percent_complete(moodle, net):
+    """Used to raise ZeroDivisionError."""
     from services.moodle_integration import moodle_get_course_activity_completion_status
 
     net.reply = Reply({"statuses": []})
 
-    with pytest.raises(ZeroDivisionError):
-        moodle_get_course_activity_completion_status("5", "42")
+    result = moodle_get_course_activity_completion_status("5", "42")
+
+    assert result["total_course_activities"] == 0
+    assert result["percentage_completed"] == 0
 
 
-def test_a_moodle_error_document_is_an_unhelpful_type_error(moodle, net):
-    """DEFECT, pinned: Moodle reports problems as ``{"exception": ...}`` with a
-    200, so ``statuses`` is absent and ``len(None)`` is the error the member's
-    induction check ends up reporting."""
+def test_a_moodle_error_document_is_reported_with_moodles_message(moodle, net):
+    """Used to be ``TypeError: len(None)``. Moodle reports problems as
+    ``{"exception": ...}`` with a 200, so ``statuses`` is absent."""
     from services.moodle_integration import moodle_get_course_activity_completion_status
 
     net.reply = Reply({"exception": "webservice_access_exception", "message": "no"})
 
-    with pytest.raises(TypeError):
+    with pytest.raises(RuntimeError, match="no"):
         moodle_get_course_activity_completion_status("5", "42")
 
 
@@ -378,27 +383,23 @@ def test_an_ambiguous_or_missing_moodle_user_raises(moodle, net, rows, message):
         moodle_get_user_from_email("a@example.com")
 
 
-def test_an_email_with_a_plus_is_sent_to_moodle_unescaped(moodle, net):
-    """DEFECT, pinned: the address is concatenated into the query string.
-
-    ``a+b@example.com`` is a valid, common address. In a query string ``+`` is
-    a space, so Moodle looks up ``"a b@example.com"``, finds nobody, and the
-    member can never pass the induction check. An ``&`` in the address would
-    inject a parameter. ``requests`` would encode both if given ``params=``.
-    """
+def test_an_email_is_passed_to_moodle_as_an_encoded_parameter(moodle, net):
+    """Used to be concatenated into the query string, so ``a+b@example.com``
+    was looked up as ``a b@example.com`` and an ``&`` injected a parameter."""
     from services.moodle_integration import moodle_get_user_from_email
 
     net.reply = Reply([])
 
     with pytest.raises(RuntimeError):
-        moodle_get_user_from_email("a+b@example.com")
+        moodle_get_user_from_email("a+b@example.com&x=1")
 
-    assert net.calls[0][1].endswith("&field=email&values[0]=a+b@example.com")
+    kwargs = net.calls[0][2]
+    assert kwargs["params"] == {"field": "email", "values[0]": "a+b@example.com&x=1"}
+    assert "a+b" not in net.calls[0][1]
 
 
-def test_moodle_requests_have_no_timeout(moodle, net):
-    """DEFECT, pinned: neither Moodle call passes ``timeout=``, so a Moodle that
-    accepts the connection and stalls holds the member's request open."""
+def test_moodle_requests_have_a_timeout(moodle, net, settings):
+    """Used to pass no ``timeout=``, so a stalled Moodle held the request open."""
     from services.moodle_integration import (
         moodle_get_course_activity_completion_status,
         moodle_get_user_from_email,
@@ -409,7 +410,10 @@ def test_moodle_requests_have_no_timeout(moodle, net):
     net.reply = Reply([{"id": 1, "email": "", "username": "", "firstname": "", "lastname": "", "fullname": ""}])
     moodle_get_user_from_email("a@example.com")
 
-    assert all("timeout" not in kwargs for _verb, _url, kwargs in net.calls)
+    assert all(
+        kwargs.get("timeout") == settings.REQUEST_TIMEOUT
+        for _verb, _url, kwargs in net.calls
+    )
 
 
 # --------------------------------------------------------------------------
@@ -465,34 +469,38 @@ def test_an_answer_with_no_data_means_no_scores(canvas, net):
     assert canvas.get_course_scores("12") == {}
 
 
-def test_a_course_that_does_not_exist_is_a_type_error(canvas, net):
-    """DEFECT, pinned: ``data.course`` is ``null`` for an unknown course id, and
-    the next line indexes into it. A mistyped ``CANVAS_INDUCTION_COURSE_ID``
-    therefore surfaces as ``TypeError`` rather than "no scores"."""
+def test_a_course_that_does_not_exist_has_no_scores(canvas, net):
+    """Used to be ``TypeError``: ``data.course`` is ``null`` for an unknown id."""
     net.reply = Reply({"data": {"course": None}})
 
-    with pytest.raises(TypeError):
-        canvas.get_course_scores("999")
+    assert canvas.get_course_scores("999") == {}
 
 
-@pytest.mark.parametrize(
-    "node", [{"user": None, "grades": {"finalScore": 1}}, {"user": {"email": "a@b.c"}, "grades": None}]
-)
-def test_an_enrolment_with_no_user_or_no_grades_is_an_attribute_error(canvas, net, node):
-    """DEFECT, pinned: ``.get("user").get(...)`` and ``.get("grades").get(...)``
-    assume both exist; one odd enrolment fails the check for the whole course."""
-    net.reply = canvas_course(node)
+def test_an_enrolment_with_no_user_is_skipped(canvas, net):
+    """Used to fail the check for the whole course with ``AttributeError``."""
+    net.reply = canvas_course(
+        {"user": None, "grades": {"finalScore": 1}},
+        {"user": {"email": "A@B.c"}, "grades": {"finalScore": 80}},
+    )
 
-    with pytest.raises(AttributeError):
-        canvas.get_course_scores("12")
+    assert canvas.get_course_scores("12") == {"a@b.c": 80}
 
 
-def test_canvas_requests_have_no_timeout(canvas, net):
-    """DEFECT, pinned: the same missing ``timeout=`` as Moodle."""
+def test_an_enrolment_with_no_grades_scores_none(canvas, net):
+    net.reply = canvas_course({"user": {"email": "a@b.c"}, "grades": None})
+
+    assert canvas.get_course_scores("12") == {"a@b.c": None}
+
+
+def test_canvas_requests_have_a_timeout(canvas, net, settings):
+    """Used to pass no ``timeout=``."""
     net.reply = canvas_course()
     canvas.get_course_scores("12")
 
-    assert all("timeout" not in kwargs for _verb, _url, kwargs in net.calls)
+    assert all(
+        kwargs.get("timeout") == settings.REQUEST_TIMEOUT
+        for _verb, _url, kwargs in net.calls
+    )
 
 
 # --------------------------------------------------------------------------
@@ -572,28 +580,23 @@ def test_an_interlock_event_is_announced_on_discord_and_slack(chat, kind):
     assert "Ann" in slack_call[2]["json"]["text"]
 
 
-def test_an_unrecognised_interlock_event_posts_an_empty_message(chat):
-    """DEFECT, pinned: no ``else``, so the payload is posted as built.
-
-    Discord receives ``{"description": "", "embeds": []}`` and Slack ``{}``,
-    both of which the services reject with an error the code never looks at.
-    """
+def test_an_unrecognised_interlock_event_posts_nothing(chat):
+    """Used to post ``{"description": "", "embeds": []}`` / ``{}``, which the
+    services reject."""
     from services.discord import post_interlock_swipe_to_discord
     from services.slack import post_interlock_swipe_to_slack
 
-    post_interlock_swipe_to_discord("Ann", "Lathe", "exploded")
-    post_interlock_swipe_to_slack("Ann", "Lathe", "exploded")
+    assert post_interlock_swipe_to_discord("Ann", "Lathe", "exploded") is True
+    assert post_interlock_swipe_to_slack("Ann", "Lathe", "exploded") is True
 
-    assert chat.calls[0][2]["json"] == {"description": "", "embeds": []}
-    assert chat.calls[1][2]["json"] == {}
+    assert chat.calls == []
 
 
-def test_discords_interlock_post_returns_none_when_it_succeeds(chat):
-    """DEFECT, pinned: every other notifier returns ``True``; this one falls off
-    the end after a successful post and returns ``None``."""
+def test_discords_interlock_post_returns_true_when_it_succeeds(chat):
+    """Used to return ``None``, unlike every other notifier."""
     from services.discord import post_interlock_swipe_to_discord
 
-    assert post_interlock_swipe_to_discord("Ann", "Lathe", "activated") is None
+    assert post_interlock_swipe_to_discord("Ann", "Lathe", "activated") is True
 
 
 def test_the_smaller_announcements(chat):
@@ -650,41 +653,33 @@ def test_a_read_timeout_is_swallowed(chat):
 @pytest.mark.parametrize(
     "error", [requests.exceptions.ConnectionError("refused"), requests.exceptions.ConnectTimeout("no route")]
 )
-def test_any_other_network_error_escapes_the_notifier(chat, error):
-    """DEFECT, pinned: only ``ReadTimeout`` is caught.
+def test_any_network_error_is_swallowed_by_the_notifier(chat, error):
+    """Used to escape: only ``ReadTimeout`` was caught.
 
-    The notifiers are called in the middle of other work, and a chat service
-    that is down -- refusing the connection, or not answering it -- raises
-    straight out of them.
+    The notifiers are called in the middle of other work, so a chat service that
+    is down must not raise out of them.
     """
     from services.discord import post_door_swipe_to_discord
     from services.slack import post_door_swipe_to_slack
 
     chat.error = error
 
-    with pytest.raises(type(error)):
-        post_door_swipe_to_discord("Ann", "Front", True)
-    with pytest.raises(type(error)):
-        post_door_swipe_to_slack("Ann", "Front", True)
+    assert post_door_swipe_to_discord("Ann", "Front", True) is True
+    assert post_door_swipe_to_slack("Ann", "Front", True) is True
 
 
-def test_a_discord_outage_breaks_logging_a_door_swipe(chat, make_door, make_member):
-    """DEFECT, pinned: the consequence of the above where it matters.
-
-    ``Doors.log_access`` posts to Discord after it has written the ``DoorLog``
-    row, from inside the device's WebSocket handler. A refused connection to
-    Discord therefore raises into the consumer, which answers the door with an
-    ``error`` packet and drops its connection, for a swipe that had in fact
-    been logged.
-    """
+def test_a_discord_outage_does_not_break_logging_a_door_swipe(
+    chat, make_door, make_member
+):
+    """Used to raise into the door's WebSocket consumer after the ``DoorLog``
+    row had been written, dropping the door's connection."""
     from access.models import DoorLog
 
     door = make_door(serial="chat-door", post_to_discord=True)
     member = make_member(state="active", rfid="CHAT-DOOR")
     chat.error = requests.exceptions.ConnectionError("refused")
 
-    with pytest.raises(requests.exceptions.ConnectionError):
-        door.log_access(member.user.id, success=True)
+    door.log_access(member.user.id, success=True)
 
     assert DoorLog.objects.filter(door=door, user=member.user).count() == 1
 

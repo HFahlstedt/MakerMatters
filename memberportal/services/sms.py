@@ -48,8 +48,8 @@ class SMS:
                     data=body,
                 )
             if portal_user_sender and portal_user_recipient:
-                message = f"Skipped sending SMS to {portal_user_sender.get_full_name()} because SMS is turned off."
-                portal_user_recipient.log_event(
+                message = f"Skipped sending SMS to {portal_user_recipient.get_full_name()} because SMS is turned off."
+                portal_user_sender.log_event(
                     description=message, event_type="sms", data=body
                 )
             return False

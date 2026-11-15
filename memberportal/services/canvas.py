@@ -1,4 +1,5 @@
 import requests
+from django.conf import settings
 from constance import config
 
 
@@ -13,6 +14,7 @@ class Canvas:
         r = requests.get(
             self.base_url + url,
             headers={"Authorization": f"Bearer {self.api_token}"},
+            timeout=settings.REQUEST_TIMEOUT,
         )
 
         return r.json()
@@ -22,6 +24,7 @@ class Canvas:
             self.graphql_url,
             headers={"Authorization": f"Bearer {self.api_token}"},
             data=query,
+            timeout=settings.REQUEST_TIMEOUT,
         )
 
         return response.json()
@@ -54,14 +57,21 @@ class Canvas:
             return {}
 
         # get the result of our query
-        students = students["course"]["enrollmentsConnection"]["nodes"]
+        course = students.get("course")
+        if not course:
+            # unknown course id
+            return {}
+
+        students = course["enrollmentsConnection"]["nodes"]
         scores = {}
 
         # loop through each student, and if they have an email, add them to the scores dict
         for student in students:
-            student_email = student.get("user").get("email")
+            student_email = (student.get("user") or {}).get("email")
             if student_email:
-                scores[student_email.lower()] = student.get("grades").get("finalScore")
+                scores[student_email.lower()] = (student.get("grades") or {}).get(
+                    "finalScore"
+                )
 
         return scores
 

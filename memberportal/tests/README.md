@@ -31,20 +31,12 @@ rather than a patch, or because nobody has asked yet:
   endpoint reveals whether an address is registered, and kiosk login ignores
   member state. Also the two serializations of one profile
   (`test_the_two_profile_serializations_disagree`), which is an API decision.
-- The outbound services, in `test_services.py`. Moodle and Canvas requests set no
-  timeout. Discord and Slack catch only `ReadTimeout`, so a refused connection
-  raises out of a door swipe's logging. With SMS on, a member with no phone
-  number cannot be deactivated or activated (the text is sent before the state
-  changes, and after the email), and any Twilio error does the same. A Moodle
-  course with no activities divides by zero, a Moodle error document is a
-  `TypeError`, and an email address containing `+` or `&` is put into the query
-  string unescaped, so `a+b@example.com` is never found. A Canvas course that
-  does not exist, or an enrolment with no user or grades, is a `TypeError` /
-  `AttributeError`. `SMS()` raises if `SMS_MESSAGES` is not valid JSON. The
-  skipped-SMS log line names the sender where it means the recipient. Discord's
-  interlock notifier returns `None` on success, and both services post an empty
-  message for an unrecognised interlock event. `send_single_email` returns
-  `True` for an email it did not send (no key, or a suppressed recipient).
+- The outbound services, in `test_services.py`. A Moodle activity that was
+  completed but failed (`complete_fail`) counts towards the induction
+  percentage, so a member who failed every activity scores 100%. `SMS()` raises
+  if `SMS_MESSAGES` is not valid JSON. `send_single_email` returns `True` for an
+  email it did not send (no key, or a suppressed recipient), so callers that
+  check the result can never see that as a failure.
 - The issue reporter, in `test_member_tools.py` and `test_issue_integrations.py`.
   Whether one failing leg should make the whole report a 500, when the others
   delivered and a retry duplicates them, is a decision.

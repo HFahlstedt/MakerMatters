@@ -436,12 +436,13 @@ class Profile(ExportModelOperationsMixin("profile"), models.Model):
                 "profile",
             )
 
-        self.user.email_disable_member()
-        sms_message = sms.SMS()
-        sms_message.send_deactivated_access(self.phone)
+        # Change the state first: telling the member must never be able to
+        # stop their access being turned off.
         self.state = "inactive"
         self.save()
         self.sync_access()
+        self.user.email_disable_member()
+        self._send_sms("send_deactivated_access")
         return True
 
     def activate(self, request=None):
@@ -460,15 +461,24 @@ class Profile(ExportModelOperationsMixin("profile"), models.Model):
                 "profile",
             )
 
-        if self.state != "noob":
-            sms_message = sms.SMS()
-            sms_message.send_activated_access(self.phone)
-            self.user.email_enable_member()
+        notify = self.state != "noob"
 
         self.state = "active"
         self.save()
         self.sync_access()
+
+        if notify:
+            self.user.email_enable_member()
+            self._send_sms("send_activated_access")
         return True
+
+    def _send_sms(self, method_name):
+        """Text the member, but never let a missing number or an SMS outage
+        undo the state change that has already been made."""
+        try:
+            getattr(sms.SMS(), method_name)(self.phone)
+        except Exception:
+            logger.exception("Could not send SMS %s to member %s", method_name, self.pk)
 
     def set_account_only(self):
         self.state = "accountonly"
