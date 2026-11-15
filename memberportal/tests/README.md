@@ -41,6 +41,12 @@ rather than a patch, or because nobody has asked yet:
   `scopes_supported`, so the custom scopes (`membershipinfo`, `vikunja_teams`)
   are not discoverable. Adding them means overriding the library's view, so it
   is left as-is until someone needs it.
+- `UserManager`, in `test_user_manager.py`. Email is unique case-sensitively but
+  login looks it up with `iexact`, so two users whose addresses differ only in
+  case make both logins raise `MultipleObjectsReturned`. The web paths
+  lowercase addresses; only the manager, a shell or the Django admin can create
+  the pair. Also `is_active` is Django's class-level `True`, not a column, so a
+  login can only be blocked through `Profile.state`.
 - The issue reporter, in `test_member_tools.py` and `test_issue_integrations.py`.
   Whether one failing leg should make the whole report a 500, when the others
   delivered and a retry duplicates them, is a decision.
@@ -125,6 +131,7 @@ opens the log file at import time.
 | `test_access_edges.py` | The edges of the device protocol: commands the server pushes to a connected device, interlock sessions that are unknown or belong to another device, the vending machine's unknown-product branch, the interlock rejection bookkeeping and the Celery heartbeat. |
 | `test_services.py` | The outbound integrations in `services/`: SMS, Moodle, Canvas, Discord, Slack and Postmark, and what each does when the far end is slow, down or odd. |
 | `test_oidc_claims.py` | What the OpenID Connect provider tells other systems about a member: the `userinfo` claims, the `membershipinfo` and `vikunja_teams` scopes, and the `/api/openid/` endpoints with a real token. |
+| `test_user_manager.py` | `UserManager`: `create_user`, `create_staffuser`, `create_superuser`, the `createsuperuser` command and the case-insensitive login lookup. |
 | `test_issue_integrations.py` | Where a reported issue goes: the Vikunja, Trello and Discord legs of `/api/tools/issue/`, and how a failure in one affects the others and the response. |
 | `test_spacedirectory_api.py` | The SpaceAPI directory: the public open/closed document, and the endpoint a door controller or weather station uses to update state and sensors. Includes a test that posts every example in `docs/SPACEDIRECTORY.md`. |
 | `test_metrics_api.py` | The metrics pipeline end to end: the six `calculate_*` functions, the stats page, the Prometheus gauge update, and the Celery task that drives it. |
