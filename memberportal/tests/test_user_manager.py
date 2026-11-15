@@ -7,7 +7,6 @@ Django's ``authenticate()`` looks a user up at login.
 import pytest
 from django.contrib.auth import authenticate
 from django.core.management import call_command
-from django.db import IntegrityError
 
 pytestmark = pytest.mark.django_db
 
@@ -85,7 +84,7 @@ def test_create_user_can_make_a_superuser_without_the_other_flags(User):
 def test_a_duplicate_email_is_rejected(User):
     User.objects.create_user("new@example.com", "pw")
 
-    with pytest.raises(IntegrityError):
+    with pytest.raises(ValueError, match="already exists"):
         User.objects.create_user("new@example.com", "pw2")
 
 
@@ -155,16 +154,34 @@ def test_is_active_is_not_a_stored_field_so_a_login_cannot_be_disabled(User):
     assert authenticate(username="new@example.com", password="pw") is not None
 
 
-def test_two_addresses_differing_only_in_case_break_the_login_lookup(User):
-    """DEFECT, pinned: ``email`` is unique case-sensitively, but login looks it
-    up with ``iexact``. Both ``Ann@example.com`` and ``ann@example.com`` can be
-    created, after which either one's login hits ``MultipleObjectsReturned``
-    instead of failing or succeeding, so neither can sign in (a 500 from the
-    login view). Registration and the email-change endpoint lowercase the
-    address, so only the manager itself (``createsuperuser``, a shell or the
-    Django admin) can create the pair."""
+def test_create_user_rejects_an_address_that_differs_only_in_case(User):
+    """Used to be allowed: ``email`` is unique case-sensitively, so the pair
+    could be created and then broke the case-insensitive login lookup."""
     User.objects.create_user("Ann@example.com", "pw")
-    User.objects.create_user("ann@example.com", "pw")
 
-    with pytest.raises(User.MultipleObjectsReturned):
-        authenticate(username="ann@example.com", password="pw")
+    with pytest.raises(ValueError, match="already exists"):
+        User.objects.create_user("ann@example.com", "pw2")
+
+    assert User.objects.count() == 1
+
+
+def test_a_case_variant_pair_made_outside_the_manager_can_each_sign_in(User):
+    """Used to raise ``MultipleObjectsReturned`` for both. Rows made with
+    ``User.objects.create`` (a shell, the Django admin, old data) bypass the
+    manager's check, so the lookup prefers an exact match."""
+    upper = User.objects.create(email="Ann@example.com")
+    upper.set_password("pw-upper")
+    upper.save()
+    lower = User.objects.create(email="ann@example.com")
+    lower.set_password("pw-lower")
+    lower.save()
+
+    assert authenticate(username="Ann@example.com", password="pw-upper") == upper
+    assert authenticate(username="ann@example.com", password="pw-lower") == lower
+
+
+def test_an_ambiguous_login_that_matches_neither_exactly_fails_cleanly(User):
+    User.objects.create(email="Ann@example.com")
+    User.objects.create(email="ann@example.com")
+
+    assert authenticate(username="ANN@example.com", password="pw") is None

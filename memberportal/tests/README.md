@@ -41,12 +41,8 @@ rather than a patch, or because nobody has asked yet:
   `scopes_supported`, so the custom scopes (`membershipinfo`, `vikunja_teams`)
   are not discoverable. Adding them means overriding the library's view, so it
   is left as-is until someone needs it.
-- `UserManager`, in `test_user_manager.py`. Email is unique case-sensitively but
-  login looks it up with `iexact`, so two users whose addresses differ only in
-  case make both logins raise `MultipleObjectsReturned`. The web paths
-  lowercase addresses; only the manager, a shell or the Django admin can create
-  the pair. Also `is_active` is Django's class-level `True`, not a column, so a
-  login can only be blocked through `Profile.state`.
+- `is_active` is Django's class-level `True`, not a column (`test_user_manager.py`),
+  so a login can only be blocked through `Profile.state`.
 - The issue reporter, in `test_member_tools.py` and `test_issue_integrations.py`.
   Whether one failing leg should make the whole report a 500, when the others
   delivered and a retry duplicates them, is a decision.

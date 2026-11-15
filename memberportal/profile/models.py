@@ -111,7 +111,21 @@ def log_event(
 
 class UserManager(BaseUserManager):
     def get_by_natural_key(self, username):
-        return self.get(**{self.model.USERNAME_FIELD + "__iexact": username})
+        field = self.model.USERNAME_FIELD
+        # An exact match always wins, so addresses that differ only in case
+        # (which older data may contain) can each still sign in as themselves.
+        try:
+            return self.get(**{field: username})
+        except self.model.DoesNotExist:
+            pass
+
+        try:
+            return self.get(**{field + "__iexact": username})
+        except self.model.MultipleObjectsReturned:
+            # Ambiguous: fail the login cleanly rather than raising.
+            raise self.model.DoesNotExist(
+                "More than one user matches that address ignoring case."
+            )
 
     def create_user(self, email, password=None, is_superuser=False):
         """
@@ -120,7 +134,11 @@ class UserManager(BaseUserManager):
         if not email:
             raise ValueError("Users must have an email address")
 
-        user = self.model(email=self.normalize_email(email))
+        email = self.normalize_email(email)
+        if self.filter(email__iexact=email).exists():
+            raise ValueError("A user with that email address already exists")
+
+        user = self.model(email=email)
 
         user.is_superuser = is_superuser
         user.set_password(password)
