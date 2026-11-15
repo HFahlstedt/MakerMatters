@@ -37,6 +37,13 @@ rather than a patch, or because nobody has asked yet:
   if `SMS_MESSAGES` is not valid JSON. `send_single_email` returns `True` for an
   email it did not send (no key, or a suppressed recipient), so callers that
   check the result can never see that as a failure.
+- The OIDC claims, in `test_oidc_claims.py`. Blank profile fields are sent to
+  relying parties as literal `NO_FIRSTNAME`, `NO_SCREENNAME`, `NO_PHONENUMBER`
+  and so on, so an account created from the claims gets those as real values;
+  the `NO_NAME` fallback can never fire, because two blank names join to a
+  single space. The discovery document has no `scopes_supported`, so the custom
+  scopes are not discoverable. `VIKUNJA_TEAMS` is only checked for being valid
+  JSON, not for being a list.
 - The issue reporter, in `test_member_tools.py` and `test_issue_integrations.py`.
   Whether one failing leg should make the whole report a 500, when the others
   delivered and a retry duplicates them, is a decision.
@@ -120,6 +127,7 @@ opens the log file at import time.
 | `test_api_general_gaps.py` | The edges of `api_general`: the site config's fallbacks for bad JSON, the Mailchimp leg of registration, the sign-out chat post, the kiosk model, the model-permission map and the Celery failure hook. |
 | `test_access_edges.py` | The edges of the device protocol: commands the server pushes to a connected device, interlock sessions that are unknown or belong to another device, the vending machine's unknown-product branch, the interlock rejection bookkeeping and the Celery heartbeat. |
 | `test_services.py` | The outbound integrations in `services/`: SMS, Moodle, Canvas, Discord, Slack and Postmark, and what each does when the far end is slow, down or odd. |
+| `test_oidc_claims.py` | What the OpenID Connect provider tells other systems about a member: the `userinfo` claims, the `membershipinfo` and `vikunja_teams` scopes, and the `/api/openid/` endpoints with a real token. |
 | `test_issue_integrations.py` | Where a reported issue goes: the Vikunja, Trello and Discord legs of `/api/tools/issue/`, and how a failure in one affects the others and the response. |
 | `test_spacedirectory_api.py` | The SpaceAPI directory: the public open/closed document, and the endpoint a door controller or weather station uses to update state and sensors. Includes a test that posts every example in `docs/SPACEDIRECTORY.md`. |
 | `test_metrics_api.py` | The metrics pipeline end to end: the six `calculate_*` functions, the stats page, the Prometheus gauge update, and the Celery task that drives it. |
