@@ -186,9 +186,7 @@ class GetMemberbucksBalanceList(APIView):
     permission_classes = (permissions.IsAdminUser | HasAPIKey,)
 
     def get(self, request):
-        total_balance = Profile.objects.filter(memberbucks_balance__lt=1000).aggregate(
-            Sum("memberbucks_balance")
-        )
+        total_balance = Profile.objects.aggregate(Sum("memberbucks_balance"))
         member_balances = (
             Profile.objects.all()
             .order_by("-memberbucks_balance")

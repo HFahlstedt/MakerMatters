@@ -219,17 +219,10 @@ def test_the_memberbucks_balance_is_the_sum_of_profile_balances(make_member):
     assert latest("memberbucks_balance_total").data == {"value": 1004.0}
 
 
-def test_a_balance_of_1000_or_more_is_left_out_of_the_total_without_a_word(
-    make_member,
-):
-    """Pinned as behaviour: an undocumented outlier filter.
-
-    ``filter(memberbucks_balance__lt=1000)`` drops any wallet holding $1000 or
-    more from the total. Nothing says why, or in what unit -- balances are
-    dollars -- and the stored row gives no hint that anything was excluded.
-    Whether it guards against a runaway balance or hides a real one is a
-    question for whoever set it up.
-    """
+def test_a_large_balance_is_included_in_the_total(make_member):
+    """Used to be left out: ``filter(memberbucks_balance__lt=1000)`` dropped any
+    wallet holding $1000 or more, undocumented, so the gauge and the stats page
+    understated what is in circulation."""
     import api_metrics.metrics as m
 
     set_balance(make_member(state="active", rfid="BIG-1"), 20.0)
@@ -238,14 +231,14 @@ def test_a_balance_of_1000_or_more_is_left_out_of_the_total_without_a_word(
 
     m.calculate_memberbucks_balance()
 
-    assert latest("memberbucks_balance_total").data == {"value": 20.0}
+    assert latest("memberbucks_balance_total").data == {"value": 6020.0}
 
 
 def test_the_memberbucks_balance_is_zero_when_there_is_nothing_to_sum():
     """Used to be ``{"value": null}``; the other five metrics fall back to a row.
 
     ``aggregate(Sum(...))`` over no rows is ``None``, and it was stored as is.
-    A site with no members, or none under the $1000 cutoff, got a null where
+    A site with no members got a null where
     the stats page and the Prometheus gauge both expect a number.
     """
     import api_metrics.metrics as m
@@ -285,13 +278,10 @@ def test_transactions_are_netted_per_type_largest_total_first(make_member):
     ]
 
 
-def test_a_single_transaction_of_1000_or_more_is_left_out_of_its_total(make_member):
-    """Pinned as behaviour: the same silent $1000 cutoff, per row this time.
-
-    The filter is on each ``MemberBucks`` row, not on the sum, so a $1500
-    Stripe top-up vanishes from the stripe total while the $20 beside it is
-    kept -- and the wallet it landed in is then over the balance cutoff too.
-    """
+def test_a_large_transaction_is_included_in_its_total(make_member):
+    """Used to be left out: the $1000 filter was on each ``MemberBucks`` row, so
+    a $1500 Stripe top-up vanished from the stripe total while the $20 beside it
+    was kept."""
     import api_metrics.metrics as m
 
     member = make_member(state="active", rfid="TX-BIG")
@@ -302,9 +292,8 @@ def test_a_single_transaction_of_1000_or_more_is_left_out_of_its_total(make_memb
     m.calculate_memberbucks_balance()
 
     assert latest("memberbucks_transactions_total").data == [
-        {"type": "stripe", "total": 20.0}
+        {"type": "stripe", "total": 1520.0}
     ]
-    assert latest("memberbucks_balance_total").data == {"value": 0.0}
 
 
 def test_transactions_with_no_rows_store_a_stripe_zero_row():
@@ -419,26 +408,27 @@ def test_the_stats_series_returns_the_last_row_of_each_day_oldest_first(
     assert [r["data"] for r in response.data["subscription_count_total"]] == ["other"]
 
 
-def test_a_stats_day_is_a_utc_day_not_a_local_one(as_member, make_member):
-    """Pinned as behaviour: the day is cut at 00:00 UTC.
-
-    The query groups on SQL ``date(creation_date)``, which is the stored UTC
-    date, while the portal runs in ``TIME_ZONE`` (Australia/Brisbane, UTC+10
-    by default). Two rows eight hours apart that fall on one local day are two
-    days to this endpoint.
-    """
+def test_a_stats_day_is_a_local_day(as_member, make_member):
+    """Used to be cut at 00:00 UTC: the query grouped on SQL
+    ``date(creation_date)``, the stored UTC date, while the portal runs in
+    ``TIME_ZONE`` (Australia/Brisbane, UTC+10 by default). Two rows eight hours
+    apart that fell on one local day counted as two days. A day is now a day in
+    ``TIME_ZONE`` and the last reading of it is kept."""
     member = make_member(state="active", rfid="STAT-UTC")
-    midnight = (timezone.now() - timedelta(days=10)).replace(
+    local_midnight = timezone.localtime(timezone.now() - timedelta(days=10)).replace(
         hour=0, minute=0, second=0, microsecond=0
     )
-    make_metric("member_count_total", "before", midnight - timedelta(hours=1))
-    make_metric("member_count_total", "after", midnight + timedelta(hours=1))
+    make_metric("member_count_total", "day-1-early", local_midnight + timedelta(hours=1))
+    make_metric("member_count_total", "day-1-late", local_midnight + timedelta(hours=20))
+    make_metric("member_count_total", "day-2", local_midnight + timedelta(hours=25))
+    make_metric("member_count_total", "day-0", local_midnight - timedelta(hours=1))
 
     response = as_member(member).get("/api/statistics/")
 
     assert [r["data"] for r in response.data["member_count_total"]] == [
-        "before",
-        "after",
+        "day-0",
+        "day-1-late",
+        "day-2",
     ]
 
 
@@ -471,29 +461,25 @@ def test_with_the_stats_page_off_members_get_empty_series_but_still_see_on_site(
     assert response.data["on_site"]["count"] == 1
 
 
-def test_with_the_stats_page_off_only_the_admin_flag_unlocks_the_data(
+def test_with_the_stats_page_off_staff_see_the_data(
     as_member, as_admin, make_member, set_config
 ):
-    """Pinned as behaviour: this view asks ``user.is_admin``, not ``is_staff``.
-
-    The rest of the API gates on ``is_staff`` (``IsAdminUser``). The two are
-    separate columns on the User, so a staff member without the ``admin`` flag
-    -- including the staff user the admin tests log in as -- is treated like
-    any other member here.
-    """
+    """Used to ask ``user.is_admin`` where the rest of the API gates on
+    ``is_staff`` (``IsAdminUser``), so a staff member without the ``admin`` flag
+    -- including the staff user the admin tests log in as -- was treated like
+    any other member here."""
     set_config(ENABLE_STATS_PAGE=False)
     make_metric("member_count_total", "visible")
     staff = as_admin()
     assert staff.admin_profile.user.is_staff
     assert not staff.admin_profile.user.is_admin
 
-    assert staff.get("/api/statistics/").data["member_count_total"] == []
-
-    staff.admin_profile.user.admin = True
-    staff.admin_profile.user.save()
     assert [
         r["data"] for r in staff.get("/api/statistics/").data["member_count_total"]
     ] == ["visible"]
+
+    member = make_member(state="active", rfid="STAT-OFF")
+    assert as_member(member).get("/api/statistics/").data["member_count_total"] == []
 
 
 # --------------------------------------------------------------------------

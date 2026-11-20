@@ -128,9 +128,7 @@ def calculate_subscription_count():
 
 def calculate_memberbucks_balance():
     logger.debug("Calculating memberbucks balance total")
-    total_balance = Profile.objects.filter(memberbucks_balance__lt=1000).aggregate(
-        Sum("memberbucks_balance")
-    )
+    total_balance = Profile.objects.aggregate(Sum("memberbucks_balance"))
     Metric.objects.create(
         name=Metric.MetricName.MEMBERBUCKS_BALANCE_TOTAL,
         # Sum() over no rows is None; the other metrics fall back to a zero row.
@@ -143,8 +141,7 @@ def calculate_memberbucks_transactions():
     logger.debug("Calculating subscription count total")
     transaction_data = []
     for transaction_type in (
-        MemberBucks.objects.filter(amount__lt=1000)
-        .values("transaction_type")
+        MemberBucks.objects.values("transaction_type")
         .annotate(amount=Sum("amount"))
         .order_by("-amount")
     ):

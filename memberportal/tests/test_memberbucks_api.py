@@ -521,18 +521,9 @@ def test_the_balance_list_includes_every_profile_richest_first(as_admin, make_me
     assert [row["memberbucks_balance"] for row in rows] == [30.0, 5.0, 0.0]
 
 
-def test_the_circulation_total_silently_drops_large_balances(as_admin, make_member):
-    """DEFECT, pinned: the total and the list disagree above 1,000.
-
-    ``total_memberbucks`` is aggregated over ``memberbucks_balance__lt=1000``;
-    the per-member list beneath it is not filtered at all. So a member holding
-    1,000 or more appears in the list but is left out of the figure that
-    claims to be the total in circulation. The endpoint's docstring promises
-    "the total memberbucks in circulation", with no mention of a cut-off.
-
-    The threshold may exist to exclude test or treasurer accounts, but it is
-    undocumented, not configurable, and invisible in the response.
-    """
+def test_the_circulation_total_includes_large_balances(as_admin, make_member):
+    """Used to disagree with the list: ``total_memberbucks`` left out any wallet
+    holding 1,000 or more, though the per-member list beneath it showed it."""
     whale = make_member(state="active", rfid="WALLET-LIST-4")
     ordinary = make_member(state="active", rfid="WALLET-LIST-5")
     credit(whale, 1500)
@@ -542,4 +533,4 @@ def test_the_circulation_total_silently_drops_large_balances(as_admin, make_memb
 
     listed = sum(row["memberbucks_balance"] for row in body["member_balances"])
     assert listed == 1520.0
-    assert body["total_memberbucks"] == 20.0
+    assert body["total_memberbucks"] == listed

@@ -1,4 +1,4 @@
-from django.db.models import Max, Sum
+from django.db.models import Sum
 from django.utils import timezone
 from rest_framework_api_key.permissions import HasAPIKey
 
@@ -36,23 +36,25 @@ class Statistics(APIView):
 
         for metric_name in Metric.MetricName.values:
             # Don't return any data from the API if the stats page isn't enabled
-            if config.ENABLE_STATS_PAGE or request.user.is_admin:
+            if config.ENABLE_STATS_PAGE or request.user.is_staff:
                 metric_data = []
                 one_year_before_today = timezone.now() - timezone.timedelta(
                     days=config.STATS_MAX_DAYS
                 )
-                last_stat_per_day = (
+                # The last reading of each day, where a day is a day in the
+                # portal's TIME_ZONE (not UTC). Grouped here rather than in SQL
+                # so it does not depend on the database having time zone tables.
+                last_id_per_day = {}
+                for metric_id, created in (
                     Metric.objects.filter(
                         name=metric_name, creation_date__gte=one_year_before_today
                     )
-                    .extra(select={"the_date": "date(creation_date)"})
-                    .values_list("the_date")
-                    .order_by("-the_date")
-                    .annotate(max_date=Max("creation_date"))
-                )
-                max_dates = [item[1] for item in last_stat_per_day]
+                    .order_by("creation_date", "id")
+                    .values_list("id", "creation_date")
+                ):
+                    last_id_per_day[timezone.localtime(created).date()] = metric_id
                 metrics = Metric.objects.filter(
-                    name=metric_name, creation_date__in=max_dates
+                    id__in=last_id_per_day.values()
                 ).order_by("creation_date")
                 for metric in metrics:
                     metric_data.append(
