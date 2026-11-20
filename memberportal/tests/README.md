@@ -30,45 +30,21 @@ rather than a patch, or because nobody has asked yet:
   them instead needs a create endpoint and an "Add kiosk" button first.
 - The two serializations of one profile
   (`test_the_two_profile_serializations_disagree`), which is an API decision.
-- The outbound services, in `test_services.py`. A Moodle activity that was
-  completed but failed (`complete_fail`) counts towards the induction
-  percentage, so a member who failed every activity scores 100%. `SMS()` raises
-  if `SMS_MESSAGES` is not valid JSON. `send_single_email` returns `True` for an
-  email it did not send (no key, or a suppressed recipient), so callers that
-  check the result can never see that as a failure.
-- The OIDC discovery document, in `test_oidc_claims.py`, has no
-  `scopes_supported`, so the custom scopes (`membershipinfo`, `vikunja_teams`)
-  are not discoverable. Adding them means overriding the library's view, so it
-  is left as-is until someone needs it.
+- The outbound services, in `test_services.py`. `SMS()` raises
+  if `SMS_MESSAGES` is not valid JSON.
 - `is_active` is Django's class-level `True`, not a column (`test_user_manager.py`),
   so a login can only be blocked through `Profile.state`.
-- The issue reporter, in `test_member_tools.py` and `test_issue_integrations.py`.
-  Whether one failing leg should make the whole report a 500, when the others
-  delivered and a retry duplicates them, is a decision.
-- The memberbucks balance list's circulation total silently excludes balances
-  of 1,000 or more, while the per-member list beside it does not. The threshold
-  may be deliberate — to leave out test or treasurer accounts — so whether to
-  remove it, document it or make it configurable is a decision.
 - Proxy votes, in `test_meeting_api.py`. Whether one member may hold unlimited
   proxies is a constitutional question, not a bug. Also still as-is: editing a
   meeting ignores its type (`MeetingForm.vue` disables it by design), a past
   meeting's date can still be moved, attendees are written nowhere, and a
-  holder cannot list the proxies they hold. `PUT`/`DELETE` of an unknown
-  meeting id is an unchecked `.get()`.
-- The metrics pipeline, in `test_metrics_api.py`. Wallets of $1000 or more and
-  single transactions of $1000 or more are left out of the memberbucks totals
-  by an undocumented cutoff, as in the balance list above. The stats page
-  groups by UTC day while the portal runs in `TIME_ZONE`. With the stats page
-  off, `user.is_admin` unlocks the data where the rest of the API uses
-  `is_staff`. Two of the six gauges lack the `mm_` prefix, and
-  renaming them breaks whatever scrapes them. The shipped `METRICS_INTERVAL`
+  holder cannot list the proxies they hold.
+- The metrics pipeline, in `test_metrics_api.py`. Two of the six gauges lack the
+  `mm_` prefix, and renaming them breaks whatever scrapes them. The shipped `METRICS_INTERVAL`
   default logs its own "NOT recommended" warning.
 
 - The space directory, in `test_spacedirectory_api.py`. A sensor is identified by
-  its name alone, so two sensors cannot share one. `SPACE_DIRECTORY_OPEN` and
-  `SPACE_DIRECTORY_MESSAGE` are offered in the Constance admin but never read:
-  the open state and message live on the `SpaceAPI` row. Removing them changes
-  the Constance golden file, so whether to is a decision. The endpoint is
+  its name alone, so two sensors cannot share one. The endpoint is
   public by design, and exposes the active member count and how many people
   are signed in to the site.
 
