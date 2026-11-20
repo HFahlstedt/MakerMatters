@@ -322,16 +322,15 @@ def test_a_kiosk_swipe_by_an_unverified_member_is_rejected(
     assert response.json() == {"message": "error.emailNotVerified"}
 
 
-def test_a_kiosk_swipe_ignores_member_state(api_client, make_member, make_kiosk):
-    """DEFECT, pinned: an inactive member can still log in at a kiosk.
-
-    Unlike ``get_tags()``, which filters on ``state="active"``, the kiosk login
-    path checks only that the tag matches a profile and the email is verified.
-    A member who has been deactivated cannot open a door but can still sign
-    into the portal at the kiosk in front of it.
-    """
+@pytest.mark.parametrize("state", ["inactive", "noob", "accountonly"])
+def test_a_kiosk_swipe_by_a_member_who_is_not_active_is_rejected(
+    api_client, make_member, make_kiosk, state
+):
+    """Used to log in any member whose tag matched. Like ``get_tags()``, the
+    kiosk now admits only ``state="active"``, and answers as it does for an
+    unknown card so the reply does not say who is a member."""
     make_kiosk(kiosk_id="kiosk-inactive")
-    make_member(state="inactive", rfid="KIOSK-TAG-5")
+    make_member(state=state, rfid="KIOSK-TAG-5")
 
     response = api_client.post(
         "/api/login/kiosk/",
@@ -339,7 +338,7 @@ def test_a_kiosk_swipe_ignores_member_state(api_client, make_member, make_kiosk)
         format="json",
     )
 
-    assert response.status_code == 200
+    assert response.status_code == 401
 
 
 @pytest.mark.parametrize("body", [{}, {"cardId": "X"}, {"kioskId": "Y"}])
@@ -542,18 +541,45 @@ def test_requesting_a_reset_mints_a_key_and_emails_it(
     assert len(sent_emails) == 1
 
 
-def test_requesting_a_reset_for_an_unknown_email_reports_failure(api_client):
-    """DEFECT, pinned: the response distinguishes registered from unregistered.
+def test_requesting_a_reset_for_an_unknown_email_answers_as_for_a_known_one(
+    api_client, make_member, sent_emails
+):
+    """Used to answer ``{"success": False}``, so the endpoint doubled as an
+    oracle for whether an address has an account. The reply is now identical,
+    and no email is sent for an unknown address."""
+    make_member(state="active", rfid="RESET-KNOWN").user
+    known = api_client.post(
+        "/api/password/reset/", {"email": "member1@example.com"}, format="json"
+    )
+    sent = len(sent_emails)
 
-    A bare ``except`` returns ``{"success": False}`` when the lookup fails, so
-    the endpoint doubles as an oracle for whether an address has an account.
-    The usual practice is to answer identically either way.
-    """
-    response = api_client.post(
+    unknown = api_client.post(
         "/api/password/reset/", {"email": "nobody@example.com"}, format="json"
     )
 
-    assert response.json() == {"success": False}
+    assert unknown.status_code == known.status_code
+    assert unknown.json() == known.json() == {"success": True}
+    assert len(sent_emails) == sent
+
+
+def test_a_reset_that_cannot_send_its_email_still_answers_success(
+    api_client, make_member, monkeypatch
+):
+    """Reporting the failure would reveal that the address is registered."""
+    from profile.models import User
+
+    member = make_member(state="active", rfid="RESET-BOOM")
+
+    def boom(self):
+        raise RuntimeError("mail is down")
+
+    monkeypatch.setattr(User, "reset_password", boom)
+
+    response = api_client.post(
+        "/api/password/reset/", {"email": member.user.email}, format="json"
+    )
+
+    assert response.json() == {"success": True}
 
 
 def test_a_valid_reset_token_validates(api_client, make_member, sent_emails):

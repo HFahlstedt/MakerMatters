@@ -3,6 +3,7 @@ from django.utils import timezone
 from rest_framework_api_key.permissions import HasAPIKey
 
 import api_metrics.metrics as api_metrics
+from api_metrics.security import HasMetricsPushToken
 from api_metrics.models import Metric
 from api_general.models import SiteSession
 
@@ -85,9 +86,12 @@ class UpdateStatistics(APIView):
 class UpdatePromMetrics(APIView):
     """
     post: triggers Django to update the Prometheus site metrics from the database.
+
+    Only the Celery task calls this, and it sends a token derived from
+    ``SECRET_KEY`` (see ``api_metrics.security``).
     """
 
-    permission_classes = (permissions.AllowAny,)
+    permission_classes = (HasMetricsPushToken,)
 
     def post(self, request):
         metrics = []

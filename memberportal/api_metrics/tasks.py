@@ -1,5 +1,6 @@
 from membermatters.celeryapp import app
 from api_metrics.metrics import *
+from api_metrics.security import HEADER, metrics_push_token
 
 import requests
 from constance import config
@@ -49,6 +50,7 @@ def calculate_metrics():
         # connection, and the gauges silently stop moving if it goes unseen.
         response = requests.post(
             config.SITE_URL.rstrip("/") + "/api/update-prom-metrics/",
+            headers={HEADER: metrics_push_token()},
             timeout=UPDATE_PROM_METRICS_TIMEOUT,
         )
         response.raise_for_status()

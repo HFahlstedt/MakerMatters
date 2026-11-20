@@ -536,13 +536,42 @@ def test_an_integration_api_key_can_recalculate_too(with_api_key):
 # --------------------------------------------------------------------------
 
 
-def test_update_prom_metrics_needs_no_login_and_no_key(api_client):
-    """Pinned as behaviour: ``AllowAny``, deliberately -- the Celery task that
-    calls it sends no credentials. Anyone who can reach the site can make it
-    read the database, so whether it should be open is a deployment decision.
-    """
-    assert api_client.post("/api/update-prom-metrics/").status_code == 200
-    assert api_client.get("/api/update-prom-metrics/").status_code == 405
+def push(client, token=None):
+    """POST to the endpoint the way the Celery task does."""
+    from api_metrics.security import META_KEY, metrics_push_token
+
+    return client.post(
+        "/api/update-prom-metrics/",
+        **{META_KEY: metrics_push_token() if token is None else token},
+    )
+
+
+def test_update_prom_metrics_needs_the_workers_token_not_a_login(api_client):
+    """Used to be open to anyone, because the task sent no credentials. It now
+    sends a token derived from ``SECRET_KEY``; no login is involved."""
+    assert push(api_client).status_code == 200
+    assert api_client.get("/api/update-prom-metrics/").status_code in (401, 403, 405)
+
+
+@pytest.mark.parametrize("token", ["", "wrong", "0" * 64])
+def test_update_prom_metrics_refuses_a_missing_or_wrong_token(api_client, token):
+    assert push(api_client, token).status_code in (401, 403)
+    assert api_client.post("/api/update-prom-metrics/").status_code in (401, 403)
+
+
+def test_update_prom_metrics_refuses_a_logged_in_staff_member_without_the_token(
+    as_admin,
+):
+    assert as_admin().post("/api/update-prom-metrics/").status_code in (401, 403)
+
+
+def test_the_token_depends_on_the_secret_key(settings):
+    from api_metrics.security import metrics_push_token
+
+    before = metrics_push_token()
+    settings.SECRET_KEY = "a-different-key"
+
+    assert metrics_push_token() != before
 
 
 def test_update_prom_metrics_answers_200_when_a_metric_exists(api_client):
@@ -556,7 +585,7 @@ def test_update_prom_metrics_answers_200_when_a_metric_exists(api_client):
     """
     make_metric("member_count_total", [{"state": "active", "total": 3}])
 
-    assert api_client.post("/api/update-prom-metrics/").status_code == 200
+    assert push(api_client).status_code == 200
     assert gauge("mm_member_count_total", state="active") == 3
 
 
@@ -572,7 +601,7 @@ def test_update_prom_metrics_copies_the_stored_rows_into_the_gauges(api_client):
         [{"type": "stripe", "total": 40.0}, {"type": "card", "total": -6.0}],
     )
 
-    response = api_client.post("/api/update-prom-metrics/")
+    response = push(api_client)
 
     assert response.status_code == 200
     assert gauge("mm_member_count_total", state="active") == 7
@@ -593,7 +622,7 @@ def test_update_prom_metrics_uses_only_the_newest_row_of_each_kind(api_client):
     )
     make_metric("member_count_total", [{"state": "active", "total": 9}], now)
 
-    api_client.post("/api/update-prom-metrics/")
+    push(api_client)
 
     assert gauge("mm_member_count_total", state="active") == 9
 
@@ -610,7 +639,7 @@ def test_a_state_that_disappears_stops_being_reported(api_client, make_member):
 
     member = make_member(state="noob", rfid="STALE-1")
     m.calculate_member_count()
-    api_client.post("/api/update-prom-metrics/")
+    push(api_client)
     assert gauge("mm_member_count_total", state="noob") == 1
 
     member.state = "active"
@@ -618,7 +647,7 @@ def test_a_state_that_disappears_stops_being_reported(api_client, make_member):
     m.calculate_member_count()
     latest_row = latest("member_count_total")
     assert by_state(latest_row.data) == {"active": 1}
-    api_client.post("/api/update-prom-metrics/")
+    push(api_client)
 
     assert gauge("mm_member_count_total", state="active") == 1
     assert gauge("mm_member_count_total", state="noob") is None
@@ -635,7 +664,7 @@ def test_a_row_stored_with_a_null_balance_is_read_as_zero(api_client):
     make_metric("memberbucks_balance_total", {"value": None})
     make_metric("memberbucks_transactions_total", [{"type": "card", "total": 2.5}])
 
-    response = api_client.post("/api/update-prom-metrics/")
+    response = push(api_client)
 
     assert response.status_code == 200
     assert gauge("mm_memberbucks_balance_total") == 0
@@ -653,7 +682,7 @@ def test_a_metric_with_no_gauge_is_logged_and_skipped(api_client, monkeypatch):
     make_metric("member_count_total", [{"state": "active", "total": 3}])
     make_metric("subscription_count_total", [{"state": "active", "total": 4}])
 
-    response = api_client.post("/api/update-prom-metrics/")
+    response = push(api_client)
 
     assert response.status_code == 200
     assert log.at("error") == ["Prometheus metric member_count_total not found."]
@@ -776,10 +805,15 @@ def test_calculate_metrics_stores_all_six_then_pokes_the_web_process(
     tasks.calculate_metrics()
 
     assert sorted(Metric.objects.values_list("name", flat=True)) == sorted(ALL_METRICS)
-    # No credentials -- the endpoint is open -- but a timeout, so a hung web
-    # process cannot hold the worker forever.
+    # The token the endpoint requires, and a timeout, so a hung web process
+    # cannot hold the worker forever.
+    from api_metrics.security import HEADER, metrics_push_token
+
     assert post_to_site == [
-        (("https://portal.example.test/api/update-prom-metrics/",), {"timeout": 30})
+        (
+            ("https://portal.example.test/api/update-prom-metrics/",),
+            {"headers": {HEADER: metrics_push_token()}, "timeout": 30},
+        )
     ]
 
 

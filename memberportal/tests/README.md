@@ -27,9 +27,7 @@ rather than a patch, or because nobody has asked yet:
   the `if id:` branch. New kiosks are unauthorised by default, so this is not a
   login — but it is an unauthenticated write, and whether terminals should
   self-register is a deployment decision.
-- Two smaller ones pinned in `test_auth_and_session.py`: the password-reset
-  endpoint reveals whether an address is registered, and kiosk login ignores
-  member state. Also the two serializations of one profile
+- The two serializations of one profile
   (`test_the_two_profile_serializations_disagree`), which is an API decision.
 - The outbound services, in `test_services.py`. A Moodle activity that was
   completed but failed (`complete_fail`) counts towards the induction
@@ -61,8 +59,7 @@ rather than a patch, or because nobody has asked yet:
   by an undocumented cutoff, as in the balance list above. The stats page
   groups by UTC day while the portal runs in `TIME_ZONE`. With the stats page
   off, `user.is_admin` unlocks the data where the rest of the API uses
-  `is_staff`. `/api/update-prom-metrics/` is open to anyone because the Celery
-  task sends no credentials. Two of the six gauges lack the `mm_` prefix, and
+  `is_staff`. Two of the six gauges lack the `mm_` prefix, and
   renaming them breaks whatever scrapes them. The shipped `METRICS_INTERVAL`
   default logs its own "NOT recommended" warning.
 

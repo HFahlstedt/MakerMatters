@@ -288,6 +288,11 @@ class LoginKiosk(APIView):
                 {"message": "error.emailNotVerified"}, status=status.HTTP_403_FORBIDDEN
             )
 
+        # Like the doors, a kiosk only admits members whose access is on. The
+        # reply matches an unknown card so it does not reveal who is a member.
+        if user.profile.state != "active":
+            return Response(status=status.HTTP_401_UNAUTHORIZED)
+
         # rfid matches a user so log them in
         if user is not None:
             login(request, user)
@@ -367,13 +372,19 @@ class ResetPassword(APIView):
             return Response({"success": False})
 
         else:
+            # The reply is the same whether or not the address is registered,
+            # so this endpoint cannot be used to find out who has an account.
             try:
                 user = User.objects.get(email=body.get("email"))
                 user.reset_password()
-                return Response({"success": True})
 
-            except:
-                return Response({"success": False})
+            except User.DoesNotExist:
+                pass
+
+            except Exception:
+                logger.exception("Could not send a password reset email")
+
+            return Response({"success": True})
 
 
 class ProfileDetail(generics.GenericAPIView):
