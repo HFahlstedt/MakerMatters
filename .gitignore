@@ -158,3 +158,5 @@ errors.log*
 setupcomplete
 
 .gradle
+# Rotated log files
+**/*.log.*
