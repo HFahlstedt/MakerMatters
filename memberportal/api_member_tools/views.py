@@ -136,11 +136,16 @@ class IssueDetail(APIView):
         vikunja_task_url = None
         trello_card_url = None
 
-        failed = False
+        # Each destination is tried on its own. The report counts as sent if any
+        # of them got it, so a destination that is down does not make the
+        # member resubmit (and duplicate) it everywhere else.
+        failed_legs = set()
+        attempted_legs = []
 
         if config.REPORT_ISSUE_ENABLE_VIKUNJA and bool(
             config.VIKUNJA_DEFAULT_PROJECT_ID
         ):
+            attempted_legs.append("vikunja")
             try:
                 vikunja_project_id = int(config.VIKUNJA_DEFAULT_PROJECT_ID)
                 # The label is documented as optional and ships blank.
@@ -257,14 +262,15 @@ class IssueDetail(APIView):
                     logger.error(
                         "Failed to create Vikunja task: %s", task_response.json()
                     )
-                    failed = True
+                    failed_legs.add("vikunja")
 
             except Exception:
                 # uh oh, but don't stop processing other ones
-                failed = True
+                failed_legs.add("vikunja")
                 logger.exception("Failed to create reported issue Vikunja task.")
 
         if config.REPORT_ISSUE_ENABLE_TRELLO:
+            attempted_legs.append("trello")
             try:
                 trello_key = config.TRELLO_API_KEY
                 trello_token = config.TRELLO_API_TOKEN
@@ -289,17 +295,18 @@ class IssueDetail(APIView):
                 )
 
                 if response.status_code != 200:
-                    failed = True
+                    failed_legs.add("trello")
 
                 trello_card_url = response.json()["shortUrl"]
 
             except Exception:
                 # uh oh, but don't stop processing other ones
-                failed = True
+                failed_legs.add("trello")
                 logger.exception("Failed to create reported issue Trello card.")
 
         # email report
         if config.REPORT_ISSUE_ENABLE_EMAIL:
+            attempted_legs.append("email")
             try:
                 subject = f"{request.user.profile.get_full_name()}: {title}"
 
@@ -312,15 +319,16 @@ class IssueDetail(APIView):
                     user=request.user,
                     reply_to=request.user.email,
                 ):
-                    failed = True
+                    failed_legs.add("email")
 
             except Exception:
                 # uh oh, but don't stop processing other ones
-                failed = True
+                failed_legs.add("email")
                 logger.exception("Failed to send reported issue email.")
 
         # discord report
         if config.REPORT_ISSUE_ENABLE_DISCORD:
+            attempted_legs.append("discord")
             try:
                 discord.post_reported_issue_to_discord(
                     request.user.profile.get_full_name(),
@@ -330,13 +338,18 @@ class IssueDetail(APIView):
                     trello_card_url,
                 )
             except Exception:
-                failed = True
+                failed_legs.add("discord")
                 logger.exception("Failed to post reported issue to Discord.")
 
         # Logged once the outcome is known, so the member's record says whether
         # the report went anywhere.
+        failed = bool(attempted_legs) and len(failed_legs) == len(attempted_legs)
+        outcome = "Failed to deliver issue: " if failed else "Submitted issue: "
+        if failed_legs and not failed:
+            outcome = f"Submitted issue (not delivered to {', '.join(sorted(failed_legs))}): "
+
         request.user.log_event(
-            ("Failed to deliver issue: " if failed else "Submitted issue: ")
+            outcome
             + title
             + " Content: "
             + description,

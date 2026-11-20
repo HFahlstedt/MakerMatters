@@ -222,9 +222,9 @@ def test_a_non_numeric_vikunja_id_fails_the_leg_and_not_the_other_legs(
 ):
     """Used to raise ``ValueError`` out of the view, before the other legs ran.
 
-    A setting that is not a number is a misconfiguration, so the report is
-    still answered 500, but the Vikunja leg now fails like any other and the
-    email goes out.
+    A setting that is not a number is a misconfiguration. The Vikunja leg fails
+    like any other, the email goes out, and because something delivered the
+    report is answered 201.
     """
     set_config(
         **{setting: value}, REPORT_ISSUE_ENABLE_EMAIL=True, EMAIL_ADMIN="a@example.com"
@@ -232,7 +232,7 @@ def test_a_non_numeric_vikunja_id_fails_the_leg_and_not_the_other_legs(
 
     response = reporter.post(URL, REPORT, format="json")
 
-    assert response.status_code == 500
+    assert response.status_code == 201
     assert network.calls == []
     assert len(sent_emails) == 1
 
@@ -342,7 +342,8 @@ def test_discord_is_posted_to_even_when_the_other_legs_failed(
 
     response = reporter.post(URL, REPORT, format="json")
 
-    assert response.status_code == 500
+    # Discord delivered it, so the report counts as sent.
+    assert response.status_code == 201
     assert len(discord_calls) == 1
     assert discord_calls[0][3:] == (None, None)
 
@@ -373,14 +374,14 @@ def test_the_discord_message_carries_the_links(
     )
 
 
-def test_a_discord_failure_is_a_500_after_the_other_legs_ran(
+def test_a_discord_failure_does_not_undo_an_email_that_was_delivered(
     reporter, network, set_config, monkeypatch, sent_emails
 ):
     """Used to escape the view: Discord was the only leg outside a ``try``.
 
     Discord was the only leg outside a ``try``, so an exception raised out of
     the view after the email had been delivered. It is now handled like the
-    other legs: logged, and a 500. (The notifier itself now swallows network
+    other legs: logged, and since the email was delivered the report is a 201. (The notifier itself now swallows network
     errors, so this guards against any other exception escaping it.)
     """
     set_config(
@@ -398,7 +399,7 @@ def test_a_discord_failure_is_a_500_after_the_other_legs_ran(
 
     response = reporter.post(URL, REPORT, format="json")
 
-    assert response.status_code == 500
+    assert response.status_code == 201
     assert len(sent_emails) == 1
 
 
@@ -430,14 +431,18 @@ def test_a_discord_outage_does_not_fail_the_report(
 # --------------------------------------------------------------------------
 
 
-def test_one_failing_leg_does_not_stop_the_others_but_makes_the_request_a_500(
+def test_one_failing_leg_does_not_stop_the_others_or_fail_the_report(
     reporter, network, vikunja, trello, set_config, sent_emails
 ):
-    """Pinned as behaviour: the report is delivered twice if the member retries.
+    """Used to be a 500, so the member retried and the report was delivered
+    twice.
 
-    Vikunja is down; the Trello card and the email still go out. The member is
-    told it failed, and pressing submit again duplicates both.
+    Vikunja is down; the Trello card and the email still go out. Something
+    delivered it, so the member is told it worked, and the member's record says
+    which destination missed it.
     """
+    from profile.models import UserEventLog
+
     set_config(
         REPORT_ISSUE_ENABLE_VIKUNJA=True,
         REPORT_ISSUE_ENABLE_EMAIL=True,
@@ -446,15 +451,35 @@ def test_one_failing_leg_does_not_stop_the_others_but_makes_the_request_a_500(
     network.answer("PUT", "/projects/7/tasks", requests.ConnectionError("down"))
     network.answer("POST", "/1/cards", Reply(200, {"shortUrl": "https://trello.com/c/x"}))
 
-    first = reporter.post(URL, REPORT, format="json")
-    second = reporter.post(URL, REPORT, format="json")
+    response = reporter.post(URL, REPORT, format="json")
 
-    assert first.status_code == second.status_code == 500
-    assert len(network.to("/1/cards")) == 2
-    assert len(sent_emails) == 2
+    assert response.status_code == 201
+    assert len(network.to("/1/cards")) == 1
+    assert len(sent_emails) == 1
+    entry = UserEventLog.objects.filter(logtype="generic").latest("id")
+    assert entry.description.startswith("Submitted issue (not delivered to vikunja): ")
 
 
-def test_an_email_that_raises_is_a_500_and_the_other_legs_still_run(
+def test_every_leg_failing_is_still_a_500(
+    reporter, network, vikunja, trello, set_config, monkeypatch
+):
+    from profile.models import UserEventLog
+
+    set_config(REPORT_ISSUE_ENABLE_VIKUNJA=True, REPORT_ISSUE_ENABLE_EMAIL=True)
+    network.answer("PUT", "/projects/7/tasks", requests.ConnectionError("down"))
+    network.answer("POST", "/1/cards", Reply(401, {"message": "unauthorized"}))
+    monkeypatch.setattr(
+        "api_member_tools.views.send_email_to_admin", lambda **kwargs: False
+    )
+
+    response = reporter.post(URL, REPORT, format="json")
+
+    assert response.status_code == 500
+    entry = UserEventLog.objects.filter(logtype="generic").latest("id")
+    assert entry.description.startswith("Failed to deliver issue: ")
+
+
+def test_an_email_that_raises_does_not_fail_a_report_trello_delivered(
     reporter, network, trello, set_config, monkeypatch
 ):
     set_config(REPORT_ISSUE_ENABLE_EMAIL=True)
@@ -467,5 +492,5 @@ def test_an_email_that_raises_is_a_500_and_the_other_legs_still_run(
 
     response = reporter.post(URL, REPORT, format="json")
 
-    assert response.status_code == 500
+    assert response.status_code == 201
     assert len(network.to("/1/cards")) == 1

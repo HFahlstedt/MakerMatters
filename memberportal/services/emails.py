@@ -31,6 +31,8 @@ def send_single_email(
         template_to_use, {"email": template_vars, "config": config}
     )
 
+    sent = False
+
     if config.POSTMARK_API_KEY:
         postmark = PostmarkClient(server_token=config.POSTMARK_API_KEY)
         try:
@@ -41,6 +43,7 @@ def send_single_email(
                 HtmlBody=email_string,
                 ReplyTo=reply_to or config.EMAIL_DEFAULT_FROM,
             )
+            sent = True
         except ClientError as e:
             code = e.error_code
 
@@ -58,7 +61,7 @@ def send_single_email(
                 logger.error("Error sending email: " + str(e))
                 raise e
 
-        if user:
+        if user and sent:
             logger.info("Email sent to " + to_email + " with subject: " + subject)
             user.log_event(
                 "Sent email with subject: " + subject,
@@ -73,7 +76,9 @@ def send_single_email(
                 "email",
                 "Email content: " + json.dumps(template_vars),
             )
-    return True
+    # True only if the provider accepted it, so a caller that checks can tell
+    # "not sent" (no key, or a recipient Postmark has suppressed) from sent.
+    return sent
 
 
 def send_email_to_admin(
