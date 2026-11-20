@@ -5,6 +5,7 @@ from profile.models import Profile
 from api_admin_tools.models import *
 
 from rest_framework import status, permissions
+from rest_framework.exceptions import APIException
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
@@ -24,7 +25,23 @@ from django.utils import timezone
 logger = logging.getLogger("billing")
 
 
+class StripeDisabled(APIException):
+    status_code = status.HTTP_503_SERVICE_UNAVAILABLE
+    default_detail = "billing.stripeDisabled"
+    default_code = "stripe_disabled"
+
+
 class StripeAPIView(APIView):
+    #: Views that call Stripe refuse to run while ``ENABLE_STRIPE`` is off.
+    #: Those that never talk to Stripe, or that Stripe talks to, opt out.
+    requires_stripe = True
+
+    def initial(self, request, *args, **kwargs):
+        super().initial(request, *args, **kwargs)
+
+        if self.requires_stripe and not config.ENABLE_STRIPE:
+            raise StripeDisabled()
+
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         if not config.ENABLE_STRIPE:
@@ -183,11 +200,10 @@ class MemberBucksAddCard(StripeAPIView):
                 f"{config.SITE_NAME}.",
             )
         except Exception as e:
+            # The card is already saved in Stripe and here, and the email is a
+            # courtesy: report the failure, but not to the member as an error.
             capture_exception(e)
-            return Response(
-                {"message": "error.postmarkNotConfigured"},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            )
+            logger.warning("Could not send the card-added email: %s", e)
 
         return Response()
 
@@ -223,6 +239,8 @@ class MemberTiers(StripeAPIView):
     """
     get: gets a list of all membership tiers.
     """
+
+    requires_stripe = False
 
     def get(self, request):
         tiers = MemberTier.objects.filter(visible=True)
@@ -387,7 +405,11 @@ class PaymentPlanSignup(StripeAPIView):
 
     def post(self, request, plan_id):
         current_plan = request.user.profile.membership_plan
-        new_plan = PaymentPlan.objects.filter(pk=plan_id).first()
+        # A plan (or its tier) marked not visible is hidden from the tiers
+        # page, and is not for sale by id either.
+        new_plan = PaymentPlan.objects.filter(
+            pk=plan_id, visible=True, member_tier__visible=True
+        ).first()
 
         if new_plan is None:
             return Response(
@@ -504,6 +526,8 @@ class CompleteSignup(StripeAPIView):
     """
     post: completes the member's signup if they have completed all requirements and enables access
     """
+
+    requires_stripe = False
 
     def post(self, request):
         member_profile = request.user.profile
@@ -742,6 +766,7 @@ class StripeWebhook(StripeAPIView):
     post: processes a Stripe webhook event.
     """
 
+    requires_stripe = False
     permission_classes = (permissions.AllowAny,)
 
     def post(self, request):

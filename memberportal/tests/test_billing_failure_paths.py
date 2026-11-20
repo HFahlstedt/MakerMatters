@@ -100,26 +100,114 @@ def subjects(sent_emails):
 # --------------------------------------------------------------------------
 
 
-def test_turning_stripe_off_does_not_stop_the_billing_endpoints(
-    billing_member, as_member, stripe_stub, set_config
+@pytest.mark.parametrize(
+    "method, url",
+    [
+        ("get", "/api/billing/card/"),
+        ("post", "/api/billing/card/"),
+        ("delete", "/api/billing/card/"),
+        ("post", "/api/billing/plans/1/signup/"),
+        ("get", "/api/billing/myplan/"),
+        ("post", "/api/billing/myplan/cancel/"),
+    ],
+)
+def test_turning_stripe_off_stops_the_endpoints_that_call_stripe(
+    billing_member, as_member, stripe_stub, set_config, method, url
 ):
-    """Pinned as behaviour: ``ENABLE_STRIPE`` only decides whether the API key is set.
-
-    ``StripeAPIView.__init__`` returns early when the setting is off, which
-    skips ``stripe.api_key = ...`` and nothing else. The views still run and
-    still call Stripe, so a space that has switched Stripe off keeps offering
-    endpoints that fail inside the SDK. Whether they should answer 404
-    instead is a decision.
-    """
+    """Used to run anyway: ``ENABLE_STRIPE`` only decided whether the API key
+    was set, so a space that had switched Stripe off kept offering endpoints
+    that failed inside the SDK. They now answer 503 without calling Stripe."""
     profile = billing_member()
     set_config(ENABLE_STRIPE=False)
-    stripe_stub.set("Customer.retrieve", FakeStripeObject({"id": "cus_fail"}))
-    stripe_stub.set("SetupIntent.create", FakeStripeObject({"client_secret": "seti"}))
 
-    response = as_member(profile).get("/api/billing/card/")
+    response = getattr(as_member(profile), method)(url)
 
-    assert response.json() == {"clientSecret": "seti"}
-    assert stripe_stub.called("Customer.retrieve")
+    assert response.status_code == 503
+    assert response.json() == {"detail": "billing.stripeDisabled"}
+    assert stripe_stub.calls == []
+
+
+def test_turning_stripe_off_leaves_the_endpoints_that_never_call_stripe(
+    billing_member, as_member, make_tier_and_plan, set_config
+):
+    """The tier list, completing a signup and the webhook do not need the API
+    key, so they stay reachable."""
+    profile = billing_member()
+    make_tier_and_plan()
+    set_config(ENABLE_STRIPE=False)
+
+    assert as_member(profile).get("/api/billing/tiers/").status_code == 200
+    assert as_member(profile).post("/api/billing/complete-signup/").status_code == 200
+
+
+def test_the_webhook_still_answers_with_stripe_off(api_client, set_config):
+    set_config(ENABLE_STRIPE=False)
+
+    response = api_client.post(
+        "/api/billing/stripe-webhook/",
+        {"type": "ping", "data": {"object": {}}},
+        format="json",
+    )
+
+    assert response.status_code != 503
+
+
+def test_a_hidden_plan_cannot_be_bought_by_id(
+    billing_member, as_member, make_tier_and_plan, stripe_stub
+):
+    """Used to be sold: only the tiers page filtered on ``visible``."""
+    profile = billing_member()
+    _tier, plan = make_tier_and_plan()
+    plan.visible = False
+    plan.save()
+
+    response = as_member(profile).post(f"/api/billing/plans/{plan.id}/signup/")
+
+    assert response.status_code == 404
+    assert response.json() == {"success": False, "message": "paymentPlan.notExists"}
+    assert not stripe_stub.called("Subscription.create")
+    assert fresh(profile).membership_plan_id is None
+
+
+def test_a_plan_in_a_hidden_tier_cannot_be_bought_by_id(
+    billing_member, as_member, make_tier_and_plan, stripe_stub
+):
+    profile = billing_member()
+    tier, plan = make_tier_and_plan()
+    tier.visible = False
+    tier.save()
+
+    response = as_member(profile).post(f"/api/billing/plans/{plan.id}/signup/")
+
+    assert response.status_code == 404
+    assert not stripe_stub.called("Subscription.create")
+
+
+def test_a_failed_confirmation_email_does_not_undo_a_saved_card(
+    billing_member, as_member, stripe_stub, captured, monkeypatch
+):
+    """Used to be a 500 (``error.postmarkNotConfigured``) after the card had
+    already been attached and saved, so the member saw an error for a card that
+    worked. The failure is now reported to Sentry and the member told it saved."""
+    from profile.models import User
+
+    profile = billing_member()
+    stripe_stub.set("PaymentMethod.retrieve", a_card())
+
+    def broken(self, *args, **kwargs):
+        raise RuntimeError("Postmark is not configured")
+
+    monkeypatch.setattr(User, "email_notification", broken)
+
+    response = as_member(profile).post(
+        "/api/billing/card/", {"paymentMethodId": "pm_new"}
+    )
+
+    assert response.status_code == 200
+    saved = fresh(profile)
+    assert saved.stripe_payment_method_id == "pm_new"
+    assert saved.stripe_card_last_digits == "1111"
+    assert len(captured) == 1
 
 
 def test_an_unreadable_secret_key_is_reported_and_the_request_carries_on(
