@@ -5,7 +5,8 @@ import django.db.utils
 from django.contrib import admin
 from django.conf import settings
 from django.conf.urls.static import static
-from django.urls import include, path
+from django.urls import include, path, re_path
+from membermatters.oidc_provider_settings import get_provider_info_view
 import sentry_sdk
 from sentry_sdk.integrations.django import DjangoIntegration
 from constance import config
@@ -38,6 +39,12 @@ def safe_constance_get(fld: str):
 #     pass
 
 urlpatterns = [
+    # Ahead of the library's own route so the discovery document lists scopes.
+    re_path(
+        r"^api/openid/\.well-known/openid-configuration/?$",
+        get_provider_info_view(),
+        name="provider-info-with-scopes",
+    ),
     path("api/openid/", include("oidc_provider.urls", namespace="oidc_provider")),
     path("", include("api_metrics.urls")),
     path("", include("api_spacedirectory.urls")),

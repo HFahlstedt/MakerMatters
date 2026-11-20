@@ -99,3 +99,34 @@ class CustomScopeClaims(ScopeClaims):
                 )
 
         return {}
+
+
+#: The scopes the provider will honour: the OpenID Connect standard ones the
+#: library implements, then the portal's own (``CustomScopeClaims``).
+SCOPES_SUPPORTED = [
+    "openid",
+    "profile",
+    "email",
+    "phone",
+    "address",
+    "membershipinfo",
+    "vikunja_teams",
+]
+
+
+def get_provider_info_view():
+    """The library's discovery view, with ``scopes_supported`` added.
+
+    The library does not publish it, so a relying party cannot discover the
+    custom scopes. Imported lazily because the library's views need the app
+    registry.
+    """
+    from oidc_provider.views import ProviderInfoView
+
+    class ProviderInfoWithScopes(ProviderInfoView):
+        def _build_response_dict(self, request):
+            dic = super()._build_response_dict(request)
+            dic["scopes_supported"] = SCOPES_SUPPORTED
+            return dic
+
+    return ProviderInfoWithScopes.as_view()

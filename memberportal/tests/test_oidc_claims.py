@@ -388,9 +388,6 @@ def test_the_userinfo_endpoint_rejects_an_expired_token(
 
 
 def test_the_discovery_document_points_at_the_portals_endpoints(api_client, db):
-    """Pinned as behaviour: the document does not list ``scopes_supported``, so
-    the custom scopes are not discoverable and a relying party has to be told
-    to ask for ``membershipinfo`` / ``vikunja_teams`` out of band."""
     response = api_client.get("/api/openid/.well-known/openid-configuration")
 
     assert response.status_code == 200
@@ -398,4 +395,27 @@ def test_the_discovery_document_points_at_the_portals_endpoints(api_client, db):
     assert document["issuer"].endswith("/api/openid")
     assert document["userinfo_endpoint"].endswith("/api/openid/userinfo")
     assert document["token_endpoint"].endswith("/api/openid/token")
-    assert "scopes_supported" not in document
+
+
+def test_the_discovery_document_lists_the_scopes_including_the_custom_ones(
+    api_client, db
+):
+    """Used to omit ``scopes_supported``, so ``membershipinfo`` and
+    ``vikunja_teams`` could not be discovered."""
+    document = api_client.get("/api/openid/.well-known/openid-configuration").json()
+
+    assert document["scopes_supported"] == [
+        "openid",
+        "profile",
+        "email",
+        "phone",
+        "address",
+        "membershipinfo",
+        "vikunja_teams",
+    ]
+
+
+def test_the_discovery_route_also_answers_with_a_trailing_slash(api_client, db):
+    document = api_client.get("/api/openid/.well-known/openid-configuration/").json()
+
+    assert "scopes_supported" in document
