@@ -134,7 +134,10 @@ class Meetings(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        meeting = Meeting.objects.get(id=meeting_id)
+        meeting = Meeting.objects.filter(id=meeting_id).first()
+        if meeting is None:
+            return Response(status=status.HTTP_404_NOT_FOUND)
+
         meeting.date = date
         meeting.chair = body["chair"]
         meeting.save()
@@ -142,7 +145,10 @@ class Meetings(APIView):
         return Response()
 
     def delete(self, request, meeting_id):
-        meeting = Meeting.objects.get(id=meeting_id)
+        meeting = Meeting.objects.filter(id=meeting_id).first()
+        if meeting is None:
+            return Response(status=status.HTTP_404_NOT_FOUND)
+
         # The proxies go with the meeting (on_delete=CASCADE); tell the members
         # who relied on them, as revoking one by hand would.
         proxies = list(

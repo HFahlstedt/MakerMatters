@@ -601,6 +601,21 @@ def test_an_unknown_holder_is_a_400_and_the_existing_proxy_survives(
     assert ProxyVote.objects.get().proxy_user == holder.user
 
 
+def test_editing_an_unknown_meeting_is_a_404(as_admin):
+    """Used to be an unchecked ``Meeting.objects.get(id=...)`` -- a 500."""
+    response = as_admin().put(
+        "/api/meetings/99999/",
+        {"date": "2030-01-01 18:00", "chair": "Ann"},
+        format="json",
+    )
+
+    assert response.status_code == 404
+
+
+def test_deleting_an_unknown_meeting_is_a_404(as_admin):
+    assert as_admin().delete("/api/meetings/99999/").status_code == 404
+
+
 def test_an_unknown_meeting_is_a_400(make_member, make_meeting):
     from api_meeting.models import ProxyVote
 
