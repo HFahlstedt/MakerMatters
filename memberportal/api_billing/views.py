@@ -772,26 +772,33 @@ class StripeWebhook(StripeAPIView):
     def post(self, request):
         webhook_secret = config.STRIPE_WEBHOOK_SECRET
         body = request.body
-        request_data = request.data
 
-        if webhook_secret:
-            # Retrieve the event by verifying the signature if webhook signing is configured.
-            signature = request.headers.get("stripe-signature")
-            try:
-                event = stripe.Webhook.construct_event(
-                    payload=body, sig_header=signature, secret=webhook_secret
-                )
-                data = event["data"]
-            except Exception as e:
-                logger.error(e)
-                capture_exception(e)
-                return Response({"error": "Error validating Stripe signature."})
+        if not webhook_secret:
+            # An unsigned body is just a claim by whoever posted it, so without
+            # the secret there is nothing to trust. Stripe retries a failure,
+            # so events are not lost while the secret is being set.
+            logger.error(
+                "Refusing a Stripe webhook: STRIPE_WEBHOOK_SECRET is not set."
+            )
+            return Response(
+                {"error": "Stripe webhook signing is not configured."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
-            # Get the type of webhook event sent - used to check the status of PaymentIntents.
-            event_type = event["type"]
-        else:
-            data = request_data["data"]
-            event_type = request_data["type"]
+        # Retrieve the event by verifying the signature.
+        signature = request.headers.get("stripe-signature")
+        try:
+            event = stripe.Webhook.construct_event(
+                payload=body, sig_header=signature, secret=webhook_secret
+            )
+            data = event["data"]
+        except Exception as e:
+            logger.error(e)
+            capture_exception(e)
+            return Response({"error": "Error validating Stripe signature."})
+
+        # Get the type of webhook event sent - used to check the status of PaymentIntents.
+        event_type = event["type"]
 
         data = data["object"]
 

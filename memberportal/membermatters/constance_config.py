@@ -110,7 +110,7 @@ CONSTANCE_CONFIG = {
     "STRIPE_SECRET_KEY": ("", "Set this to your Stripe PRIVATE API key."),
     "STRIPE_WEBHOOK_SECRET": (
         "",
-        "Set this to a secret value to verify that a webhook came from Stripe.",
+        "The signing secret (whsec_...) of the Stripe webhook endpoint. Required: with it unset every Stripe webhook is refused, as an unsigned request cannot be trusted.",
     ),
     "STRIPE_MEMBERBUCKS_TOPUP_OPTIONS": (
         "[1000, 2000, 3000]",

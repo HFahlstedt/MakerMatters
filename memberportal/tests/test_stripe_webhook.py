@@ -6,8 +6,10 @@ activate them independently. Both write the same fields, and the webhook is
 what reconciles ``Profile.state`` with ``Profile.subscription_status``.
 
 It is unauthenticated by design (Stripe calls it), so signature verification is
-the only thing standing between the public internet and membership activation —
-and it only happens when ``STRIPE_WEBHOOK_SECRET`` is set.
+the only thing standing between the public internet and membership activation.
+It is required: with ``STRIPE_WEBHOOK_SECRET`` unset every event is refused.
+(Used to be skipped, trusting the request body as is.) ``conftest.py`` stands in
+for Stripe's verification so tests can post the event body directly.
 """
 
 import pytest
@@ -28,10 +30,10 @@ def event(event_type, **object_fields):
 
 @pytest.fixture
 def stripe_member(make_member, set_config):
-    """A member linked to a Stripe customer, with webhook signing disabled."""
+    """A member linked to a Stripe customer, with a webhook secret set."""
 
     def _build(state="noob", rfid="TAG-STRIPE", **overrides):
-        set_config(STRIPE_WEBHOOK_SECRET="", MAX_INDUCTION_DAYS=0, **overrides)
+        set_config(STRIPE_WEBHOOK_SECRET="whsec_test", MAX_INDUCTION_DAYS=0, **overrides)
         profile = make_member(state=state, rfid=rfid)
         profile.stripe_customer_id = CUSTOMER_ID
         profile.stripe_subscription_id = "sub_test_12345"
@@ -246,7 +248,7 @@ def test_events_for_unknown_customers_are_silently_accepted(
     make_member, api_client, set_config
 ):
     """A shared Stripe account may process payments unrelated to this system."""
-    set_config(STRIPE_WEBHOOK_SECRET="")
+    set_config(STRIPE_WEBHOOK_SECRET="whsec_test")
     make_member(state="active")
 
     response = api_client.post(
@@ -268,7 +270,7 @@ def test_an_event_with_no_customer_is_ignored(make_member, api_client, set_confi
     whose customer field is empty matched all of them at once. Only
     ``DoesNotExist`` was caught, so the lookup raised instead of being ignored.
     """
-    set_config(STRIPE_WEBHOOK_SECRET="")
+    set_config(STRIPE_WEBHOOK_SECRET="whsec_test")
     make_member(state="active", rfid="TAG-A")
     make_member(state="active", rfid="TAG-B")
 
@@ -290,7 +292,7 @@ def test_an_ambiguous_customer_lookup_is_ignored_rather_than_raising(
     """A duplicate customer id must not take the webhook down either."""
     from profile.models import Profile
 
-    set_config(STRIPE_WEBHOOK_SECRET="")
+    set_config(STRIPE_WEBHOOK_SECRET="whsec_test")
     for tag in ("TAG-C", "TAG-D"):
         member = make_member(state="active", rfid=tag)
         Profile.objects.filter(pk=member.pk).update(stripe_customer_id="cus_dupe")
@@ -305,6 +307,27 @@ def test_an_ambiguous_customer_lookup_is_ignored_rather_than_raising(
     )
 
     assert response.status_code == 200
+
+
+def test_without_a_secret_every_event_is_refused_and_nothing_changes(
+    stripe_member, api_client, set_config
+):
+    """Used to trust the unsigned body, so anyone who could reach the URL could
+    post an ``invoice.paid`` and activate a member."""
+    from profile.models import Profile
+
+    profile = stripe_member(state="noob")
+    set_config(STRIPE_WEBHOOK_SECRET="")
+
+    response = api_client.post(
+        WEBHOOK_URL, event("invoice.paid", status="paid"), format="json"
+    )
+
+    assert response.status_code == 400
+    assert response.json() == {"error": "Stripe webhook signing is not configured."}
+    refreshed = Profile.objects.get(pk=profile.pk)
+    assert refreshed.state == "noob"
+    assert refreshed.subscription_status != "active"
 
 
 def test_a_configured_secret_makes_the_signature_authoritative(

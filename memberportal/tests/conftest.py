@@ -253,6 +253,21 @@ class FakeStripeObject(dict):
         self[key] = value
 
 
+def _parse_signed_event(payload=b"", **_ignored):
+    """Stand-in for ``stripe.Webhook.construct_event``: the body, as the event."""
+    import json
+
+    return json.loads(payload)
+
+
+@pytest.fixture(autouse=True)
+def webhook_signatures_accepted(monkeypatch):
+    """Webhook requests are verified; tests that do not care get a pass."""
+    import stripe
+
+    monkeypatch.setattr(stripe.Webhook, "construct_event", _parse_signed_event)
+
+
 class StripeStub:
     """Records calls into the Stripe SDK and returns canned responses.
 
@@ -297,6 +312,10 @@ class StripeStub:
         def _fn(*args, **kwargs):
             self.calls.append((path, args, kwargs))
             value = self.responses.get(path)
+            if path == "Webhook.construct_event" and value is None:
+                # Real verification is Stripe's; tests post the event body and
+                # have it accepted as if its signature were good.
+                return _parse_signed_event(**kwargs)
             if isinstance(value, Exception):
                 raise value
             if callable(value):

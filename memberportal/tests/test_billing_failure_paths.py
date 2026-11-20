@@ -141,7 +141,7 @@ def test_turning_stripe_off_leaves_the_endpoints_that_never_call_stripe(
 
 
 def test_the_webhook_still_answers_with_stripe_off(api_client, set_config):
-    set_config(ENABLE_STRIPE=False)
+    set_config(ENABLE_STRIPE=False, STRIPE_WEBHOOK_SECRET="whsec_test")
 
     response = api_client.post(
         "/api/billing/stripe-webhook/",
