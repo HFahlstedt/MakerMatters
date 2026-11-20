@@ -317,16 +317,28 @@ def test_course_progress_is_the_share_of_activities_completed(moodle, net):
     assert net.calls[0][1].endswith("&courseid=5&userid=42")
 
 
-def test_a_failed_activity_still_counts_as_completed(moodle, net):
-    """Pinned as behaviour: ``complete_fail`` is in the completed bucket, so a
-    member who failed every activity scores 100%."""
+def test_a_failed_activity_does_not_count_as_completed(moodle, net):
+    """Used to count: ``complete_fail`` was in the completed bucket, so a member
+    who failed every activity scored 100%."""
     from services.moodle_integration import moodle_get_course_activity_completion_status
 
     net.reply = Reply({"statuses": [{"state": 3}, {"state": 3}]})
 
+    result = moodle_get_course_activity_completion_status("5", "42")
+
+    assert result["percentage_completed"] == 0
+    assert result["completed_course_activities"] == 0
+    assert result["incomplete_course_activities"] == 2
+
+
+def test_a_mix_of_passed_and_failed_activities_scores_only_the_passes(moodle, net):
+    from services.moodle_integration import moodle_get_course_activity_completion_status
+
+    net.reply = Reply({"statuses": [{"state": 1}, {"state": 2}, {"state": 3}, {"state": 0}]})
+
     assert moodle_get_course_activity_completion_status("5", "42")[
         "percentage_completed"
-    ] == 100
+    ] == 50
 
 
 def test_a_course_with_no_activities_is_zero_percent_complete(moodle, net):
@@ -707,20 +719,20 @@ def test_message_text_is_html_escaped_but_br_markers_become_line_breaks(
     assert "<script>x" not in html
 
 
-def test_without_a_postmark_key_nothing_is_sent_and_it_still_reports_success(
+def test_without_a_postmark_key_nothing_is_sent_and_it_reports_that(
     sent_emails, set_config, make_member
 ):
-    """Pinned as behaviour: ``send_single_email`` returns ``True`` for an email
-    it did not send, so callers that test the result (the issue reporter) can
-    never see the "not configured" case as a failure. It is noted on the
-    member's log, which is the only trace."""
+    """Used to return ``True`` for an email it did not send, so callers that
+    test the result (the issue reporter) could never see the "not configured"
+    case as a failure. It now returns ``False``, and still notes it on the
+    member's log."""
     from profile.models import UserEventLog
     from services.emails import send_single_email
 
     set_config(POSTMARK_API_KEY="")
     member = make_member(state="active", rfid="MAIL-1")
 
-    assert send_single_email("to@example.com", "Hi", {"message": "x"}, user=member.user) is True
+    assert send_single_email("to@example.com", "Hi", {"message": "x"}, user=member.user) is False
 
     assert sent_emails == []
     entry = UserEventLog.objects.get(user=member.user, logtype="email")
@@ -741,14 +753,14 @@ def _postmark_raising(monkeypatch, code):
     )
 
 
-def test_an_inactive_recipient_is_logged_and_reported_as_success(
+def test_an_inactive_recipient_is_logged_and_reported_as_not_sent(
     monkeypatch, set_config, make_member
 ):
     """Postmark's 406 means the address bounced before and is suppressed.
 
-    Pinned as behaviour: the email is not sent, the member's log says so, and
-    the function still returns ``True``. Without a ``user`` there is no trace
-    at all beyond the logger.
+    The email is not sent, the member's log says so, and the function returns
+    ``False`` (it used to say ``True``, and also logged "Sent email" for it).
+    Without a ``user`` there is no trace at all beyond the logger.
     """
     from profile.models import UserEventLog
     from services.emails import send_single_email
@@ -757,12 +769,15 @@ def test_an_inactive_recipient_is_logged_and_reported_as_success(
     _postmark_raising(monkeypatch, 406)
     member = make_member(state="active", rfid="MAIL-2")
 
-    assert send_single_email("to@example.com", "Hi", {"message": "x"}, user=member.user) is True
-    assert send_single_email("to@example.com", "Hi", {"message": "x"}) is True
+    assert send_single_email("to@example.com", "Hi", {"message": "x"}, user=member.user) is False
+    assert send_single_email("to@example.com", "Hi", {"message": "x"}) is False
 
     assert UserEventLog.objects.filter(
         user=member.user, description__startswith="Email NOT sent because recipient is INACTIVE"
     ).count() == 1
+    assert not UserEventLog.objects.filter(
+        user=member.user, description__startswith="Sent email"
+    ).exists()
 
 
 def test_any_other_postmark_error_is_raised(monkeypatch, set_config):

@@ -57,7 +57,8 @@ def moodle_get_course_activity_completion_status(course_id: str, user_id: str):
     for activity in statuses:
         activity_status = get_moodle_completion_state(activity["state"])
 
-        if activity_status in ("complete", "complete_pass", "complete_fail"):
+        # A failed attempt is not a completed activity.
+        if activity_status in ("complete", "complete_pass"):
             completed_course_activities.append(activity)
         else:
             incomplete_course_activities.append(activity)
