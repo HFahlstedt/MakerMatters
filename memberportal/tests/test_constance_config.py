@@ -2,7 +2,7 @@
 
 Why this exists
 ---------------
-Constance holds 109 runtime settings in the database: every feature flag, every
+Constance holds 107 runtime settings in the database: every feature flag, every
 integration credential, all branding. It is read as ``config.X`` from models,
 views and WebSocket consumers, so a bad upgrade does not fail loudly — it
 silently serves wrong values, and the first symptom is a disabled feature or a

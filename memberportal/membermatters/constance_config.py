@@ -166,11 +166,6 @@ CONSTANCE_CONFIG = {
         False,
         "Turn on the space directory API available at /api/spacedirectory.",
     ),
-    "SPACE_DIRECTORY_OPEN": (False, "Sets the open state."),
-    "SPACE_DIRECTORY_MESSAGE": (
-        "This is the default MemberMatters (membermatters.org) space directory message.",
-        "Sets the message.",
-    ),
     "SPACE_DIRECTORY_ICON_OPEN": ("", "Sets the icon shown while in the open state."),
     "SPACE_DIRECTORY_ICON_CLOSED": (
         "",
@@ -551,8 +546,6 @@ CONSTANCE_CONFIG_FIELDSETS = OrderedDict(
         (
             "Space Directory",
             (
-                "SPACE_DIRECTORY_OPEN",
-                "SPACE_DIRECTORY_MESSAGE",
                 "SPACE_DIRECTORY_ICON_OPEN",
                 "SPACE_DIRECTORY_ICON_CLOSED",
                 "SPACE_DIRECTORY_LOCATION_ADDRESS",

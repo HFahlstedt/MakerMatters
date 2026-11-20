@@ -322,7 +322,7 @@ def test_deleting_a_plan(as_admin, make_tier_and_plan, set_config):
 def test_the_settings_list_only_contains_customised_values(as_admin, set_config):
     """Constance writes a row only when a value is changed from its default.
 
-    So this endpoint exposes overrides, not the full 109-key configuration. A
+    So this endpoint exposes overrides, not the full 107-key configuration. A
     refactor that reads from ``CONSTANCE_CONFIG`` instead would change both the
     contents and the size of this response.
     """

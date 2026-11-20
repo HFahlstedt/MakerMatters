@@ -97,8 +97,6 @@
       "SLACK_REPORT_ISSUE_WEBHOOK"
     ],
     "Space Directory": [
-      "SPACE_DIRECTORY_OPEN",
-      "SPACE_DIRECTORY_MESSAGE",
       "SPACE_DIRECTORY_ICON_OPEN",
       "SPACE_DIRECTORY_ICON_CLOSED",
       "SPACE_DIRECTORY_LOCATION_ADDRESS",
@@ -496,14 +494,6 @@
     "SPACE_DIRECTORY_LOCATION_LON": {
       "default": 0.0,
       "type": "float"
-    },
-    "SPACE_DIRECTORY_MESSAGE": {
-      "default": "This is the default MemberMatters (membermatters.org) space directory message.",
-      "type": "str"
-    },
-    "SPACE_DIRECTORY_OPEN": {
-      "default": false,
-      "type": "bool"
     },
     "SPACE_DIRECTORY_PROJECTS": {
       "default": "[]",

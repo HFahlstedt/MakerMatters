@@ -249,17 +249,19 @@ def test_an_open_space_reports_its_message(api_client, space):
     }
 
 
-def test_the_open_and_message_constance_settings_are_never_read(
+def test_the_open_state_and_message_live_on_the_space_row_only(
     api_client, space, set_config
 ):
-    """Pinned as behaviour: two settings the admin page offers do nothing.
+    """Used to be offered as two Constance settings that did nothing.
 
-    ``SPACE_DIRECTORY_OPEN`` and ``SPACE_DIRECTORY_MESSAGE`` sit in the
-    "Space Directory" group of the Constance admin, but the state is read from
-    the ``SpaceAPI`` row. Removing them changes the Constance golden file, so
-    whether to is a decision rather than a patch.
+    ``SPACE_DIRECTORY_OPEN`` and ``SPACE_DIRECTORY_MESSAGE`` sat in the "Space
+    Directory" group of the Constance admin, but the state is read from the
+    ``SpaceAPI`` row. They are gone, so the admin page no longer offers them.
     """
-    set_config(SPACE_DIRECTORY_OPEN=True, SPACE_DIRECTORY_MESSAGE="Come on in")
+    from constance import config
+
+    assert not hasattr(config, "SPACE_DIRECTORY_OPEN")
+    assert not hasattr(config, "SPACE_DIRECTORY_MESSAGE")
 
     state = document(api_client)["state"]
 
