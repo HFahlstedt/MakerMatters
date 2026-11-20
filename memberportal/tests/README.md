@@ -22,11 +22,12 @@ rather than a patch, or because nobody has asked yet:
 - `AccessControlledDevice.all_members` is a column on every device type, but
   vending machines have no per-member access list for it to gate. The admin
   API no longer exposes it for that type; the column remains.
-- A kiosk can still register itself: a `PUT /api/kiosks/` with an unrecognised
-  `kioskId` creates one with no permission check, because the guard sits inside
-  the `if id:` branch. New kiosks are unauthorised by default, so this is not a
-  login — but it is an unauthenticated write, and whether terminals should
-  self-register is a deployment decision.
+- A kiosk registers itself: a `PUT /api/kiosks/` with an unrecognised `kioskId`
+  creates one with no permission check. That is deliberate, since the admin UI
+  can only edit and delete kiosks, so a terminal's first PUT is the only way one
+  is created. New kiosks are unauthorised, the id is validated, at most 20 may
+  wait for approval, and each registration is logged. Making an admin create
+  them instead needs a create endpoint and an "Add kiosk" button first.
 - The two serializations of one profile
   (`test_the_two_profile_serializations_disagree`), which is an API decision.
 - The outbound services, in `test_services.py`. A Moodle activity that was

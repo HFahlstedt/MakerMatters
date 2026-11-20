@@ -517,6 +517,12 @@ def is_staff_request(request):
     return request.user.is_authenticated and request.user.is_staff
 
 
+#: ``Kiosk.name`` is filled from the id a terminal supplies, and is this long.
+MAX_KIOSK_NAME_LENGTH = 30
+#: How many self-registered kiosks may wait for approval before more are refused.
+MAX_UNAUTHORISED_KIOSKS = 20
+
+
 class Kiosks(APIView):
     """
     get: retrieves a list of all kiosks.
@@ -563,11 +569,43 @@ class Kiosks(APIView):
                 kiosk = Kiosk.objects.get(kiosk_id=body.get("kioskId"))
 
         except Kiosk.DoesNotExist:
+            # Terminals register themselves the first time they load, and an
+            # admin authorises them afterwards (the admin UI cannot create
+            # one). That open door is deliberate, so it is kept small: the id
+            # must be usable as a name, and only so many unauthorised kiosks
+            # may be waiting at once.
+            kiosk_id = body.get("kioskId")
+            if (
+                not isinstance(kiosk_id, str)
+                or not kiosk_id.strip()
+                or len(kiosk_id) > MAX_KIOSK_NAME_LENGTH
+            ):
+                return Response(
+                    {"message": "error.invalidKioskId"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            if (
+                not is_staff_request(request)
+                and Kiosk.objects.filter(authorised=False).count()
+                >= MAX_UNAUTHORISED_KIOSKS
+            ):
+                logger.warning(
+                    "Refused to register kiosk %r: too many unauthorised kiosks",
+                    kiosk_id,
+                )
+                return Response(status=status.HTTP_429_TOO_MANY_REQUESTS)
+
             kiosk = Kiosk.objects.create(
                 last_seen=make_aware(datetime.datetime.now()),
-                kiosk_id=body.get("kioskId"),
-                name=body.get("kioskId"),
+                kiosk_id=kiosk_id,
+                name=kiosk_id,
                 play_theme=False,
+            )
+            logger.warning(
+                "Kiosk %r registered itself from %s and awaits authorisation",
+                kiosk_id,
+                request.META.get("HTTP_X_REAL_IP", request.META.get("REMOTE_ADDR")),
             )
 
         if is_staff_request(request):

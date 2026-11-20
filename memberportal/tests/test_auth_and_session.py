@@ -1005,15 +1005,10 @@ def test_a_staff_member_can_delete_a_kiosk(as_admin, make_kiosk):
     assert not Kiosk.objects.filter(pk=kiosk.pk).exists()
 
 
-def test_an_anonymous_caller_can_create_a_kiosk(api_client):
-    """DEFECT, pinned: the guard sits inside the ``if id:`` branch.
-
-    A PUT with no id and an unrecognised ``kioskId`` falls through to
-    ``Kiosk.objects.create`` without reaching any permission check at all. New
-    kiosks are unauthorised by default, so this does not by itself grant a
-    login — but it is an unauthenticated write to the table, and the terminal
-    self-registration flow it exists for is why the check was skipped.
-    """
+def test_an_anonymous_terminal_can_register_itself_unauthorised(api_client):
+    """Pinned as a deliberate choice: the admin UI can only edit and delete
+    kiosks, so a terminal registering itself with a PUT is how one is created.
+    It starts unauthorised, so it is not a login until an admin approves it."""
     from api_general.models import Kiosk
 
     response = api_client.put(
@@ -1023,6 +1018,76 @@ def test_an_anonymous_caller_can_create_a_kiosk(api_client):
     assert response.status_code == 200
     created = Kiosk.objects.get(kiosk_id="self-registered")
     assert created.authorised is False
+    assert created.name == "self-registered"
+
+
+def test_a_self_registration_is_logged(api_client, monkeypatch):
+    import api_general.views as views
+
+    lines = []
+    monkeypatch.setattr(
+        views.logger, "warning", lambda msg, *args: lines.append(msg % args)
+    )
+
+    api_client.put("/api/kiosks/", {"kioskId": "kiosk-log"}, format="json")
+
+    assert any("kiosk-log" in line and "awaits authorisation" in line for line in lines)
+
+
+@pytest.mark.parametrize("kiosk_id", [None, "", "   ", 5, ["a"], "x" * 31])
+def test_a_self_registration_needs_a_usable_id(api_client, kiosk_id):
+    """Used to create a row for anything, including no id at all, and an id
+    longer than the 30-character name it is copied into."""
+    from api_general.models import Kiosk
+
+    body = {} if kiosk_id is None else {"kioskId": kiosk_id}
+    response = api_client.put("/api/kiosks/", body, format="json")
+
+    assert response.status_code == 400
+    assert Kiosk.objects.count() == 0
+
+
+def test_self_registration_stops_when_too_many_kiosks_are_waiting(
+    api_client, make_kiosk
+):
+    """Used to be unlimited, so anyone could fill the table."""
+    import api_general.views as views
+    from api_general.models import Kiosk
+
+    for n in range(views.MAX_UNAUTHORISED_KIOSKS):
+        Kiosk.objects.create(kiosk_id=f"waiting-{n}", name=f"waiting-{n}")
+
+    response = api_client.put("/api/kiosks/", {"kioskId": "one-too-many"}, format="json")
+
+    assert response.status_code == 429
+    assert not Kiosk.objects.filter(kiosk_id="one-too-many").exists()
+
+
+def test_authorised_kiosks_do_not_count_towards_the_waiting_limit(api_client):
+    import api_general.views as views
+    from api_general.models import Kiosk
+
+    for n in range(views.MAX_UNAUTHORISED_KIOSKS):
+        Kiosk.objects.create(
+            kiosk_id=f"ok-{n}", name=f"ok-{n}", authorised=True
+        )
+
+    response = api_client.put("/api/kiosks/", {"kioskId": "newcomer"}, format="json")
+
+    assert response.status_code == 200
+
+
+def test_a_staff_member_is_not_held_to_the_waiting_limit(as_admin):
+    import api_general.views as views
+    from api_general.models import Kiosk
+
+    for n in range(views.MAX_UNAUTHORISED_KIOSKS):
+        Kiosk.objects.create(kiosk_id=f"waiting-{n}", name=f"waiting-{n}")
+
+    response = as_admin().put("/api/kiosks/", {"kioskId": "added-by-admin"}, format="json")
+
+    assert response.status_code == 200
+
 
 
 def test_a_non_staff_member_cannot_change_kiosk_settings(
