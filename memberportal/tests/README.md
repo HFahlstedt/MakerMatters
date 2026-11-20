@@ -128,6 +128,7 @@ opens the log file at import time.
 | `test_services.py` | The outbound integrations in `services/`: SMS, Moodle, Canvas, Discord, Slack and Postmark, and what each does when the far end is slow, down or odd. |
 | `test_oidc_claims.py` | What the OpenID Connect provider tells other systems about a member: the `userinfo` claims, the `membershipinfo` and `vikunja_teams` scopes, and the `/api/openid/` endpoints with a real token. |
 | `test_user_manager.py` | `UserManager`: `create_user`, `create_staffuser`, `create_superuser`, the `createsuperuser` command and the case-insensitive login lookup. |
+| `test_celery_app.py` | The Celery app: settings read with the `CELERY_` prefix, task autodiscovery, the failure-logging signal hookup and the debug task. The task modules are covered beside the code they run (`test_metrics_api.py`, `test_access_edges.py`, `test_api_general_gaps.py`). |
 | `test_issue_integrations.py` | Where a reported issue goes: the Vikunja, Trello and Discord legs of `/api/tools/issue/`, and how a failure in one affects the others and the response. |
 | `test_spacedirectory_api.py` | The SpaceAPI directory: the public open/closed document, and the endpoint a door controller or weather station uses to update state and sensors. Includes a test that posts every example in `docs/SPACEDIRECTORY.md`. |
 | `test_metrics_api.py` | The metrics pipeline end to end: the six `calculate_*` functions, the stats page, the Prometheus gauge update, and the Celery task that drives it. |
