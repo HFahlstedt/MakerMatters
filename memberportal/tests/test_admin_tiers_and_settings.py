@@ -31,6 +31,30 @@ PLAN_FIELDS = {
 
 
 # --------------------------------------------------------------------------
+# Stripe switched off
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/api/admin/tiers/",
+        "/api/admin/plans/",
+    ],
+)
+def test_the_admin_billing_endpoints_refuse_while_stripe_is_off(
+    as_admin, set_config, path
+):
+    """Used to reach Stripe (and fail on its auth error) with billing disabled."""
+    set_config(ENABLE_STRIPE=False)
+
+    response = as_admin().get(path)
+
+    assert response.status_code == 503
+    assert response.json() == {"detail": "billing.stripeDisabled"}
+
+
+# --------------------------------------------------------------------------
 # Tiers
 # --------------------------------------------------------------------------
 

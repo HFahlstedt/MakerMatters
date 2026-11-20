@@ -367,21 +367,38 @@ def test_a_member_lists_the_proxies_they_have_appointed(make_member, make_meetin
     )
 
 
-def test_a_member_cannot_see_the_proxies_they_hold(make_member, make_meeting):
-    """``GET /api/proxies/`` filters on who appointed, never on who holds.
+def test_a_holder_can_list_the_proxies_they_hold(make_member, make_meeting):
+    """Used to be pinned: nothing in the portal showed a holder their proxies.
 
-    The only record a holder receives is the email. Nothing in the portal
-    tells a member how many votes they will be carrying into a meeting.
+    ``GET /api/proxies/`` still lists only the proxies a member gave, since its
+    response is a bare list the frontend reads; the held ones are listed at
+    ``/api/proxies/held/``.
     """
     from api_meeting.models import ProxyVote
 
     giver = make_member(state="active", rfid="PROXY-5")
     holder = make_member(state="active", rfid="PROXY-6")
-    ProxyVote.objects.create(
-        user=giver.user, proxy_user=holder.user, meeting=make_meeting()
+    meeting = make_meeting(type="agm")
+    proxy = ProxyVote.objects.create(
+        user=giver.user, proxy_user=holder.user, meeting=meeting
     )
 
+    held = client_for(holder).get("/api/proxies/held/").json()
+
+    assert held == [
+        {
+            "id": proxy.id,
+            "name": giver.get_full_name(),
+            "date": held[0]["date"],
+            "type": "Annual General",
+        }
+    ]
     assert client_for(holder).get("/api/proxies/").data == []
+    assert client_for(giver).get("/api/proxies/held/").json() == []
+
+
+def test_the_held_proxy_list_needs_a_login(api_client):
+    assert api_client.get("/api/proxies/held/").status_code == 401
 
 
 def test_the_cities_are_recorded_but_never_returned(

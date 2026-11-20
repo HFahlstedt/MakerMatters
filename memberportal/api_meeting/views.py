@@ -290,3 +290,31 @@ class MeetingTypes(APIView):
             return {"label": type[1], "value": type[0]}
 
         return Response(list(map(get_type, Meeting.MEETING_TYPES)))
+
+
+class HeldProxies(APIView):
+    """
+    get: the proxies other members have given to the requesting member.
+
+    A separate endpoint rather than a key on ``Proxies``, whose response is a
+    bare list the frontend already reads.
+    """
+
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        held = ProxyVote.objects.filter(proxy_user=request.user).select_related(
+            "user__profile", "meeting"
+        )
+
+        return Response(
+            [
+                {
+                    "id": proxy.id,
+                    "name": proxy.user.profile.get_full_name(),
+                    "date": proxy.meeting.date,
+                    "type": proxy.meeting.get_type(),
+                }
+                for proxy in held
+            ]
+        )

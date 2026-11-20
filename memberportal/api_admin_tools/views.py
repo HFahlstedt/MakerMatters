@@ -5,14 +5,12 @@ from constance.codecs import dumps as constance_dumps, loads as constance_loads
 from django.conf import settings as django_settings
 from django.db.models import F, Sum, Value, CharField, Count, Max
 from django.db.models.functions import Concat
-from django.db.utils import OperationalError
 from rest_framework import permissions
 from rest_framework import status
 from rest_framework.response import Response
 from rest_framework.generics import get_object_or_404
 from rest_framework.views import APIView
 from rest_framework_api_key.permissions import HasAPIKey
-from sentry_sdk import capture_exception
 from sentry_sdk import capture_message
 
 from access import models
@@ -24,6 +22,7 @@ from memberbucks.models import (
 from profile.models import Profile, User, UserEventLog
 from services import sms
 from services.emails import send_email_to_admin
+from api_billing.views import StripeAPIView
 from .models import MemberTier, PaymentPlan
 
 
@@ -35,18 +34,6 @@ def get_member(member_id):
     a mistyped id returned a 500 where the honest answer is a 404.
     """
     return get_object_or_404(User, id=member_id)
-
-
-class StripeAPIView(APIView):
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-        if not config.ENABLE_STRIPE:
-            return
-
-        try:
-            stripe.api_key = config.STRIPE_SECRET_KEY
-        except OperationalError as error:
-            capture_exception(error)
 
 
 class GetMembers(APIView):

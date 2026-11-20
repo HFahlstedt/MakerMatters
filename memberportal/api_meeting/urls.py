@@ -6,5 +6,6 @@ urlpatterns = [
     path("api/meetings/types/", views.MeetingTypes.as_view(), name="MeetingTypes"),
     path("api/meetings/<int:meeting_id>/", views.Meetings.as_view(), name="Meetings"),
     path("api/proxies/", views.Proxies.as_view(), name="Proxies"),
+    path("api/proxies/held/", views.HeldProxies.as_view(), name="HeldProxies"),
     path("api/proxies/<int:proxy_id>/", views.Proxies.as_view(), name="Proxies"),
 ]

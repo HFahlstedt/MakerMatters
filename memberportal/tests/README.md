@@ -37,8 +37,7 @@ rather than a patch, or because nobody has asked yet:
 - Proxy votes, in `test_meeting_api.py`. Whether one member may hold unlimited
   proxies is a constitutional question, not a bug. Also still as-is: editing a
   meeting ignores its type (`MeetingForm.vue` disables it by design), a past
-  meeting's date can still be moved, attendees are written nowhere, and a
-  holder cannot list the proxies they hold.
+  meeting's date can still be moved, and attendees are written nowhere.
 - The metrics pipeline, in `test_metrics_api.py`. Two of the six gauges lack the
   `mm_` prefix, and renaming them breaks whatever scrapes them. The shipped `METRICS_INTERVAL`
   default logs its own "NOT recommended" warning.
@@ -53,9 +52,7 @@ rather than a patch, or because nobody has asked yet:
   is reported and ignored. A `past_due` or `unpaid` subscription is recorded
   with the member left inactive until the `invoice.paid` webhook, and an
   `incomplete` one is cancelled in Stripe so a retry starts clean; both are
-  choices, not facts about Stripe. The admin tier and plan endpoints
-  (`api_admin_tools`) have their own `StripeAPIView` and are not gated by
-  `ENABLE_STRIPE`.
+  choices, not facts about Stripe.
 
 ## Running
 
