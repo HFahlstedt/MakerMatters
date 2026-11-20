@@ -1,7 +1,7 @@
 # Characterisation test suite
 
 These tests describe how the system behaves today. They were written against
-Django 3.2 as the acceptance criteria for the 4.2 → 5.2 upgrade — green before,
+Django 3.2 as the acceptance criteria for the 4.2 → 5.2 → 6.0 upgrades — green before,
 green after — and now serve the same role for the refactoring that follows.
 
 That framing matters when reading them. Where a test pins behaviour that is
